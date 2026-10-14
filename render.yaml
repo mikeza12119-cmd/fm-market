@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: FM_Market
+    name: app
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn fivem_market:app
+    startCommand: app:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
