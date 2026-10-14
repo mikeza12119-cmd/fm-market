@@ -73,7 +73,12 @@ def load_database():
             "buy_house": {"name": "บ้าน/ธุรกิจ", "icon": "🏠", "color": "#8b5cf6"},
             "other": {"name": "อื่นๆ", "icon": "📋", "color": "#6b7280"}
         },
-        "settings": {"post_lifetime_hours": POST_LIFETIME_HOURS, "max_images_per_post": 5}
+        "settings": {
+            "post_lifetime_hours": POST_LIFETIME_HOURS,
+            "max_images_per_post": 5,
+            "site_name": "FM_Market",
+            "maintenance_mode": False
+        }
     }
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -87,6 +92,8 @@ def load_database():
     for k in default_data:
         if k not in data:
             data[k] = default_data[k]
+    if "settings" not in data:
+        data["settings"] = default_data["settings"]
     for uname in data["users"]:
         user = data["users"][uname]
         if "role" not in user:
@@ -97,10 +104,11 @@ def load_database():
             user["bio"] = ""
     now = datetime.now()
     fresh_posts = []
+    lifetime = data["settings"].get("post_lifetime_hours", POST_LIFETIME_HOURS)
     for p in data["posts"]:
         try:
             post_time = datetime.strptime(p["time"], '%d/%m/%Y %H:%M')
-            if now - post_time <= timedelta(hours=POST_LIFETIME_HOURS):
+            if now - post_time <= timedelta(hours=lifetime):
                 fresh_posts.append(p)
         except Exception:
             fresh_posts.append(p)
@@ -124,7 +132,8 @@ def index():
         categories=db["categories"],
         session_user=session.get('user'),
         get_role_config=get_role_config,
-        all_users=db["users"]
+        all_users=db["users"],
+        settings=db["settings"]
     )
 
 @app.route('/api/upload-avatar', methods=['POST'])
@@ -197,6 +206,131 @@ def set_role():
     save_database(db)
     return jsonify({"success": True, "message": f"ตั้งยศ {new_role} ให้ {target_user} สำเร็จ"})
 
+@app.route('/api/admin/delete-user', methods=['POST'])
+def delete_user():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    d = request.json
+    target_user = d.get("username", "").strip()
+    db = load_database()
+    if target_user not in db["users"]:
+        return jsonify({"success": False, "message": "ไม่พบผู้ใช้"})
+    if target_user == session['user']['username']:
+        return jsonify({"success": False, "message": "ไม่สามารถลบบัญชีตัวเองได้"})
+    del db["users"][target_user]
+    db["posts"] = [p for p in db["posts"] if p["author"] != target_user]
+    save_database(db)
+    return jsonify({"success": True, "message": f"ลบผู้ใช้ {target_user} สำเร็จ"})
+
+@app.route('/api/admin/dashboard', methods=['GET'])
+def admin_dashboard():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    db = load_database()
+    return jsonify({
+        "success": True,
+        "stats": {
+            "total_users": len(db["users"]),
+            "total_posts": len(db["posts"]),
+            "total_messages": len(db["messages"]),
+            "active_users_today": len(set(
+                [m["from"] for m in db["messages"] if m["time"].startswith(datetime.now().strftime('%d/%m/%Y'))] +
+                [m["to"] for m in db["messages"] if m["time"].startswith(datetime.now().strftime('%d/%m/%Y'))]
+            ))
+        },
+        "recent_users": [
+            {"username": u, **data}
+            for u, data in sorted(db["users"].items(), key=lambda x: x[1].get("created_at", ""), reverse=True)[:10]
+        ],
+        "recent_posts": db["posts"][:10],
+        "settings": db["settings"]
+    })
+
+@app.route('/api/admin/update-settings', methods=['POST'])
+def update_settings():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    d = request.json
+    db = load_database()
+    if "post_lifetime_hours" in d:
+        db["settings"]["post_lifetime_hours"] = max(1, min(24, int(d["post_lifetime_hours"])))
+    if "max_images_per_post" in d:
+        db["settings"]["max_images_per_post"] = max(1, min(10, int(d["max_images_per_post"])))
+    if "site_name" in d:
+        db["settings"]["site_name"] = d["site_name"].strip()
+    if "maintenance_mode" in d:
+        db["settings"]["maintenance_mode"] = bool(d["maintenance_mode"])
+    save_database(db)
+    return jsonify({"success": True, "message": "บันทึกการตั้งค่าเรียบร้อย"})
+
+@app.route('/api/admin/news/add', methods=['POST'])
+def add_news():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    d = request.json
+    if not d.get("title", "").strip():
+        return jsonify({"success": False, "message": "ต้องมีหัวข้อ"})
+    db = load_database()
+    new_item = {
+        "id": str(uuid.uuid4())[:8],
+        "title": d["title"].strip(),
+        "content": d.get("content", "").strip(),
+        "date": datetime.now().strftime('%d/%m/%Y %H:%M')
+    }
+    db["news"].insert(0, new_item)
+    save_database(db)
+    return jsonify({"success": True, "news": db["news"]})
+
+@app.route('/api/admin/news/delete', methods=['POST'])
+def delete_news():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    d = request.json
+    db = load_database()
+    db["news"] = [n for n in db["news"] if n["id"] != d.get("id")]
+    save_database(db)
+    return jsonify({"success": True})
+
+@app.route('/api/admin/send-announcement', methods=['POST'])
+def send_announcement():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    d = request.json
+    if not d.get("message", "").strip():
+        return jsonify({"success": False, "message": "ข้อความห้ามว่าง"})
+    db = load_database()
+    for username in db["users"]:
+        db["notifications"].append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "announcement",
+            "from": "ระบบ",
+            "to": username,
+            "text": d["message"].strip(),
+            "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
+            "read": False
+        })
+    save_database(db)
+    return jsonify({"success": True, "message": "ส่งประกาศถึงทุกคนสำเร็จ"})
+
+@app.route('/api/admin/messages', methods=['GET'])
+def admin_messages():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    db = load_database()
+    return jsonify({"success": True, "messages": db["messages"][-100:]})
+
+@app.route('/api/admin/delete-post/<post_id>', methods=['DELETE'])
+def admin_delete_post(post_id):
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    db = load_database()
+    original_len = len(db["posts"])
+    db["posts"] = [p for p in db["posts"] if p["id"] != post_id]
+    if len(db["posts"]) == original_len:
+        return jsonify({"success": False, "message": "ไม่พบโพสต์"})
+    save_database(db)
+    return jsonify({"success": True, "message": "ลบโพสต์สำเร็จ"})
+
 @app.route('/api/upload-image', methods=['POST'])
 def upload_image():
     if 'user' not in session:
@@ -266,12 +400,13 @@ def create_post():
         return jsonify({"success": False, "message": "หมวดหมู่ไม่ถูกต้อง"})
     if not d.get("title", "").strip():
         return jsonify({"success": False, "message": "กรุณากรอกหัวข้อ"})
+    max_imgs = db["settings"].get("max_images_per_post", 5)
     post = {
         "id": str(uuid.uuid4())[:8],
         "category": d["category"],
         "title": d["title"].strip(),
         "detail": d.get("detail", "").strip(),
-        "images": d.get("images", [])[:5],
+        "images": d.get("images", [])[:max_imgs],
         "author": session['user']['username'],
         "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
         "status": "active"
@@ -502,7 +637,7 @@ MAIN_PAGE = '''
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FM_Market — ตลาดซื้อขาย</title>
 <style>
-:root{--bg:#050508;--card:#12121a;--gold:#d4af37;--gold2:#f0c808;--blue:#2563eb;--red:#c41e3a;--text:#fff;--soft:#9090a5;--border:#282838;--r:14px}
+:root{--bg:#050508;--card:#12121a;--gold:#d4af37;--gold2:#f0c808;--blue:#2563eb;--red:#c41e3a;--green:#10b981;--text:#fff;--soft:#9090a5;--border:#282838;--r:14px}
 *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,sans-serif}
 body{background:var(--bg);color:var(--text);line-height:1.6;padding-bottom:80px}
 header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 20px}
@@ -514,9 +649,11 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .btn:hover{transform:translateY(-2px)}
 .btn-gold{background:linear-gradient(90deg,var(--gold),var(--gold2));color:#000}
 .btn-blue{background:var(--blue);color:#fff}
+.btn-green{background:var(--green);color:#fff}
 .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
 .btn-sm{padding:6px 12px;font-size:.85rem}
 .btn-red{background:var(--red);color:#fff}
+.btn-danger{background:transparent;border:1px solid var(--red);color:var(--red)}
 .badge{font-size:.7rem;padding:3px 8px;border-radius:12px;font-weight:700}
 .badge-admin{background:var(--red);color:#fff}
 .badge-member{background:var(--blue);color:#fff}
@@ -607,8 +744,15 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .profile-role.member{background:linear-gradient(90deg,#374151,#6b7280);color:#fff}
 .profile-bio{color:#ccc;white-space:pre-line;margin-bottom:10px}
 .profile-meta{font-size:.8rem;color:var(--soft)}
-.admin-role-section{margin-top:20px;padding-top:20px;border-top:1px dashed var(--border)}
 .hidden-input{display:none}
+.admin-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;margin-bottom:30px}
+.admin-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px}
+.stat-num{font-size:2rem;font-weight:900;color:var(--gold)}
+.stat-label{color:var(--soft);font-size:.9rem}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+th,td{padding:10px 8px;text-align:left;border-bottom:1px solid var(--border);font-size:.9rem}
+th{color:var(--gold);font-weight:700}
+tr:hover{background:rgba(255,255,255,.02)}
 </style>
 </head>
 <body>
@@ -618,323 +762,4 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     <nav class="nav">
       <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
       <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
-      <div class="notif-wrap">
-        <button class="bell-btn" onclick="toggleNotif()">🔔<span id="notifBadge" class="badge-count">0</span></button>
-        <div id="notifPanel" class="dropdown-panel">
-          <div class="panel-head">
-            <span class="panel-title">🔔 การแจ้งเตือน</span>
-            <div class="panel-actions">
-              <button onclick="markAllNotifRead()">อ่านทั้งหมด</button>
-            </div>
-          </div>
-          <div id="notifList" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
-        </div>
-      </div>
-      <div class="chat-wrap">
-        <button class="bell-btn" onclick="toggleChatList()">💬<span id="chatBadge" class="badge-count">0</span></button>
-        <div id="chatListPanel" class="dropdown-panel">
-          <div class="panel-head">
-            <span class="panel-title">💬 ข้อความ</span>
-            <div class="panel-actions"><button onclick="markAllChatRead()">อ่านทั้งหมด</button></div>
-          </div>
-          <div id="chatListBody" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
-        </div>
-      </div>
-      <div class="profile-wrap">
-        <button class="profile-btn" onclick="showTab('profile')">👤 {{ session_user.username }}</button>
-      </div>
       {% if session_user.role == 'admin' %}
-      <span class="badge badge-admin">ผู้ดูแล</span>
-      {% elif session_user.role == 'vip' %}
-      <span class="badge" style="background:linear-gradient(90deg,#8b00ff,#da70d6);color:#fff">VIP</span>
-      {% else %}
-      <span class="badge badge-member">สมาชิก</span>
-      {% endif %}
-      <button class="btn btn-sm btn-red" onclick="doLogout()">ออก</button>
-    </nav>
-  </div>
-</header>
-
-<div id="chatOverlay" class="chat-overlay" onclick="if(event.target===this)closeChat()">
-  <div class="chat-window" onclick="event.stopPropagation()">
-    <div class="chat-header">
-      <span id="chatPartnerName" class="panel-title">แชท</span>
-      <button class="chat-close" onclick="closeChat()">×</button>
-    </div>
-    <div id="chatMessages" class="chat-messages"><div class="empty-state">กำลังโหลด...</div></div>
-    <div class="chat-input-area">
-      <input type="text" id="chatInput" placeholder="พิมพ์ข้อความ..." onkeydown="onChatEnter(event)">
-      <button class="btn btn-gold" onclick="sendChatMessage()">ส่ง</button>
-    </div>
-  </div>
-</div>
-
-<main class="container">
-  <div id="tabMarket" class="content-tab active">
-    <h2 class="sectitle">📢 ประกาศจากระบบ</h2>
-    {% for n in news %}
-    <div class="postcard">
-      <div style="font-size:.8rem;color:var(--soft);margin-bottom:6px">{{ n.date }}</div>
-      <h4 style="margin-bottom:6px">{{ n.title }}</h4>
-      <p style="color:var(--soft)">{{ n.content }}</p>
-    </div>
-    {% endfor %}
-    <section class="alert-block">
-      <h3>🛡️ วิธีใช้งานอย่างปลอดภัย</h3>
-      <ol>
-        <li>ตกลงรายละเอียดผ่านแชทในระบบเท่านั้น</li>
-        <li>โอนเงินผ่านบัญชีกลางของแอดมิน</li>
-        <li>แจ้งหลักฐาน → แอดมินยืนยันการทำรายการ</li>
-        <li>ผู้ขายส่งของ → ผู้ซื้อตรวจสอบ → ระบบจ่ายเงินให้ผู้ขาย</li>
-      </ol>
-      <p class="warn">⚠️ ห้ามโอนเงินให้ผู้อื่นโดยตรง — เราไม่รับผิดชอบหากไม่ทำตาม</p>
-    </section>
-    <h2 class="sectitle">📋 รายการซื้อขาย</h2>
-    <div class="catnav">
-      <button class="cattab active" data-cat="all" onclick="filterCat('all')">ทั้งหมด</button>
-      {% for k,v in categories.items() %}
-      <button class="cattab" data-cat="{{k}}" onclick="filterCat('{{k}}')">{{v.icon}} {{v.name}}</button>
-      {% endfor %}
-    </div>
-    <div id="postList">
-      {% if posts %}
-      {% for p in posts %}
-      {% set author_data = all_users[p.author] %}
-      {% set role_info = get_role_config(author_data.role) %}
-      <div class="postcard" data-cat="{{p.category}}">
-        <div class="post-header">
-          <div class="avatar-wrap {{author_data.role}}">
-            {% if author_data.avatar %}
-            <img src="{{author_data.avatar}}" class="avatar-img" alt="">
-            {% else %}
-            <div class="avatar-placeholder">{{p.author[0]|upper}}</div>
-            {% endif %}
-          </div>
-          <div style="flex:1">
-            <div class="post-title">{{ p.title }}</div>
-            <div class="post-meta-row">
-              <span>{{role_info.badge}} {{p.author}}</span>
-              <span class="role-badge" style="background:{{role_info.bg_badge}};color:#fff">{{role_info.name}}</span>
-              <span style="color:var(--soft)">{{ p.time }}</span>
-            </div>
-          </div>
-          {% if p.author == session_user.username or session_user.role == 'admin' %}
-          <button class="del-btn" onclick="delPost('{{p.id}}')">ลบ</button>
-          {% endif %}
-        </div>
-        <p class="post-desc">{{ p.detail }}</p>
-        {% if p.images %}
-        <div class="post-imgs">
-          {% for img in p.images %}
-          <img src="{{img}}" alt="" onclick="window.open('{{img}}')">
-          {% endfor %}
-        </div>
-        {% endif %}
-        <div class="post-foot">
-          <span>👤 {{ p.author }}</span>
-          <span>{{ p.time }}</span>
-          <button class="chat-btn-post" onclick="openChatWith('{{p.author}}')">💬 คุยด้วย</button>
-        </div>
-      </div>
-      {% endfor %}
-      {% else %}
-      <div class="empty-state">ยังไม่มีรายการ — เป็นคนแรกที่ลงประกาศเลย!</div>
-      {% endif %}
-    </div>
-  </div>
-
-  <div id="tabPost" class="content-tab">
-    <div class="form-card">
-      <h3>✍️ ลงประกาศสินค้า</h3>
-      <form id="postForm" onsubmit="submitPost(event)">
-        <div class="form-group">
-          <label>หมวดหมู่</label>
-          <select id="category" class="form-input">
-            {% for k,v in categories.items() %}
-            <option value="{{k}}">{{v.icon}} {{v.name}}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>หัวข้อ *</label>
-          <input type="text" id="title" class="form-input" placeholder="เช่น ขายเงิน M ราคาถูก" required>
-        </div>
-        <div class="form-group">
-          <label>รายละเอียด</label>
-          <textarea id="detail" class="form-input" rows="4" placeholder="เช่น ราคา 100 บาท ต่อ 1M..."></textarea>
-        </div>
-        <div class="form-group">
-          <label>รูปภาพ (สูงสุด 5 รูป)</label>
-          <div class="upload-area" onclick="document.getElementById('imgUpload').click()">
-            📷 คลิกเพื่ออัปโหลดรูป
-          </div>
-          <input type="file" id="imgUpload" accept="image/*" multiple class="hidden-input" onchange="handleImgUpload(this.files)">
-          <div id="imgPreviewRow" class="preview-row"></div>
-        </div>
-        <button type="submit" class="btn btn-gold" style="
-padding:12px 24px;width:100%">ลงประกาศ</button>
-      </form>
-    </div>
-  </div>
-
-  <div id="tabProfile" class="content-tab">
-    <div class="form-card profile-card">
-      <h3>👤 โปรไฟล์ของฉัน</h3>
-      <div class="profile-avatar-row">
-        <div id="profileAvatar" class="profile-avatar-frame member" onclick="document.getElementById('avatarUpload').click()">
-          <div class="profile-avatar-placeholder">👤</div>
-        </div>
-        <div class="profile-info">
-          <h2 id="profileUsername">{{ session_user.username }}</h2>
-          <span id="profileRole" class="profile-role member">สมาชิกทั่วไป</span>
-          <div id="profileCreated" class="profile-meta"></div>
-        </div>
-      </div>
-      <input id="avatarUpload" class="hidden-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" onchange="uploadAvatar(this.files[0])">
-      <div class="form-group">
-        <label for="profileBio">แนะนำตัว</label>
-        <textarea id="profileBio" class="form-input" rows="4" maxlength="500" placeholder="เขียนแนะนำตัว..."></textarea>
-      </div>
-      <button class="btn btn-gold" onclick="saveProfile()">บันทึกโปรไฟล์</button>
-      {% if session_user.role == 'admin' %}
-      <div class="admin-role-section">
-        <h3>👑 จัดการยศสมาชิก</h3>
-        <div class="form-group"><label>ชื่อผู้ใช้</label><input id="roleUsername" class="form-input" placeholder="ชื่อสมาชิก"></div>
-        <div class="form-group"><label>ยศ</label><select id="roleValue" class="form-input"><option value="member">สมาชิกทั่วไป</option><option value="vip">VIP</option><option value="admin">ผู้ดูแลระบบ</option></select></div>
-        <button class="btn btn-blue" onclick="setUserRole()">เปลี่ยนยศ</button>
-      </div>
-      {% endif %}
-    </div>
-  </div>
-</main>
-
-<script>
-let uploadedImages = [];
-let currentPartner = null;
-const currentUsername = {{ session_user.username|tojson }};
-
-function showTab(tab) {
-  document.querySelectorAll('.content-tab').forEach(el => el.classList.remove('active'));
-  const target = document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1));
-  if (target) target.classList.add('active');
-  if (tab === 'profile') loadProfile();
-}
-function filterCat(cat) {
-  document.querySelectorAll('.cattab').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
-  document.querySelectorAll('#postList .postcard[data-cat]').forEach(p => p.style.display = (cat === 'all' || p.dataset.cat === cat) ? '' : 'none');
-}
-async function api(url, options={}) {
-  const response = await fetch(url, options);
-  let data;
-  try { data = await response.json(); } catch (_) { throw new Error('เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง'); }
-  if (!response.ok) throw new Error(data.message || 'เกิดข้อผิดพลาด');
-  return data;
-}
-async function submitPost(e) {
-  e.preventDefault();
-  try {
-    const d = await api('/api/post', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category:document.getElementById('category').value,title:document.getElementById('title').value,detail:document.getElementById('detail').value,images:uploadedImages})});
-    if (!d.success) throw new Error(d.message || 'ลงประกาศไม่สำเร็จ');
-    alert('ลงประกาศสำเร็จ'); location.reload();
-  } catch (err) { alert(err.message); }
-}
-async function handleImgUpload(files) {
-  for (const file of Array.from(files)) {
-    if (uploadedImages.length >= 5) { alert('อัปโหลดได้สูงสุด 5 รูป'); break; }
-    if (!file.type.startsWith('image/')) { alert('กรุณาเลือกไฟล์รูปภาพ'); continue; }
-    const form = new FormData(); form.append('image', file);
-    try {
-      const d = await api('/api/upload-image', {method:'POST',body:form});
-      if (d.success) { uploadedImages.push(d.url); renderImagePreviews(); }
-      else alert(d.message || 'อัปโหลดไม่สำเร็จ');
-    } catch (err) { alert(err.message); }
-  }
-  document.getElementById('imgUpload').value = '';
-}
-function renderImagePreviews() {
-  const row = document.getElementById('imgPreviewRow'); row.replaceChildren();
-  uploadedImages.forEach((url, i) => {
-    const wrap = document.createElement('div'); wrap.className = 'preview-item';
-    const img = document.createElement('img'); img.src = url; img.alt = 'ตัวอย่างรูป';
-    const btn = document.createElement('button'); btn.type='button'; btn.className='preview-del'; btn.textContent='×'; btn.onclick=()=>{uploadedImages.splice(i,1);renderImagePreviews();};
-    wrap.append(img,btn); row.append(wrap);
-  });
-}
-async function delPost(id) {
-  if (!confirm('ยืนยันลบประกาศนี้?')) return;
-  try { const d = await api('/api/post/'+encodeURIComponent(id),{method:'DELETE'}); if(!d.success) throw new Error(d.message || 'ลบไม่สำเร็จ'); location.reload(); }
-  catch(err){alert(err.message);}
-}
-async function doLogout() {
-  try { await api('/api/logout'); location.href='/'; } catch(err){alert(err.message);}
-}
-async function loadProfile() {
-  try {
-    const d = await api('/api/profile'); if(!d.success) return;
-    document.getElementById('profileUsername').textContent=d.username;
-    document.getElementById('profileBio').value=d.bio || '';
-    document.getElementById('profileCreated').textContent='สมัครเมื่อ '+(d.created_at || '-');
-    const role = document.getElementById('profileRole'); role.textContent=d.role_info.name; role.className='profile-role '+d.role;
-    const frame=document.getElementById('profileAvatar'); frame.className='profile-avatar-frame '+d.role;
-    frame.replaceChildren();
-    if(d.avatar){const img=document.createElement('img');img.src=d.avatar;img.className='profile-avatar-img';img.alt='รูปโปรไฟล์';frame.append(img);}
-    else {const placeholder=document.createElement('div');placeholder.className='profile-avatar-placeholder';placeholder.textContent=(d.username[0]||'?').toUpperCase();frame.append(placeholder);}
-  } catch(err){console.error(err);}
-}
-async function saveProfile() {
-  try { const d=await api('/api/profile/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bio:document.getElementById('profileBio').value})}); alert(d.message || 'บันทึกแล้ว'); }
-  catch(err){alert(err.message);}
-}
-async function uploadAvatar(file) {
-  if(!file) return;
-  const form=new FormData();form.append('avatar',file);
-  try {const d=await api('/api/upload-avatar',{method:'POST',body:form});if(!d.success)throw new Error(d.message||'อัปโหลดไม่สำเร็จ');await loadProfile();alert('เปลี่ยนรูปโปรไฟล์แล้ว');}
-  catch(err){alert(err.message);} finally {document.getElementById('avatarUpload').value='';}
-}
-async function setUserRole() {
-  try {const d=await api('/api/admin/set-role',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('roleUsername').value,role:document.getElementById('roleValue').value})});alert(d.message || (d.success?'เปลี่ยนยศสำเร็จ':'ทำรายการไม่สำเร็จ'));}
-  catch(err){alert(err.message);}
-}
-function toggleNotif(){document.getElementById('notifPanel').classList.toggle('show');loadNotifications();}
-function toggleChatList(){document.getElementById('chatListPanel').classList.toggle('show');loadChatOverview();}
-async function loadNotifications(){
-  try {const d=await api('/api/notifications');const list=document.getElementById('notifList');list.replaceChildren();
-    const badge=document.getElementById('notifBadge');badge.textContent=d.unread_count;badge.classList.toggle('show',d.unread_count>0);
-    if(!d.notifications.length){list.innerHTML='<div class="empty-state">ไม่มีการแจ้งเตือน</div>';return;}
-    [...d.notifications].reverse().forEach(n=>{const el=document.createElement('div');el.className='panel-item'+(!n.read?' unread':'');const name=document.createElement('div');name.className='panel-item-name';name.textContent=n.type==='message'?'💬 ข้อความใหม่':'แจ้งเตือน';const body=document.createElement('div');body.className='panel-item-text';body.textContent=n.text;const time=document.createElement('div');time.className='panel-item-time';time.textContent=n.time;el.append(name,body,time);list.append(el);});
-  }catch(err){console.error(err);}
-}
-async function markAllNotifRead(){try{await api('/api/notifications/mark-read',{method:'POST'});loadNotifications();}catch(err){alert(err.message);}}
-async function loadChatOverview(){
-  try {const d=await api('/api/chat-overview');const body=document.getElementById('chatListBody');body.replaceChildren();const badge=document.getElementById('chatBadge');badge.textContent=d.total_unread;badge.classList.toggle('show',d.total_unread>0);const contacts=Object.entries(d.contacts).sort((a,b)=>b[1].time.localeCompare(a[1].time));
-    if(!contacts.length){body.innerHTML='<div class="empty-state">ยังไม่มีข้อความ</div>';return;}
-    contacts.forEach(([name,c])=>{const el=document.createElement('div');el.className='panel-item'+(c.unread?' unread':'');const title=document.createElement('div');title.className='panel-item-name';title.textContent=name+(c.unread?' ('+c.unread+')':'');const msg=document.createElement('div');msg.className='panel-item-text';msg.textContent=c.last_msg;const time=document.createElement('div');time.className='panel-item-time';time.textContent=c.time;el.append(title,msg,time);el.onclick=()=>{document.getElementById('chatListPanel').classList.remove('show');openChatWith(name);};body.append(el);});
-  }catch(err){console.error(err);}
-}
-function markAllChatRead(){loadChatOverview();}
-async function openChatWith(name){if(name===currentUsername){alert('ไม่สามารถแชตกับตัวเองได้');return;}currentPartner=name;document.getElementById('chatPartnerName').textContent=name;document.getElementById('chatOverlay').classList.add('show');await loadConversation();}
-function closeChat(){document.getElementById('chatOverlay').classList.remove('show');currentPartner=null;loadChatOverview();}
-async function loadConversation(){
-  if(!currentPartner)return;
-  try{const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));const box=document.getElementById('chatMessages');box.replaceChildren();d.messages.forEach(m=>{const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');const content=document.createElement('div');content.textContent=m.text;const time=document.createElement('div');time.className='msg-time';time.textContent=m.time;wrap.append(content,time);box.append(wrap);});box.scrollTop=box.scrollHeight;loadChatOverview();}
-  catch(err){alert(err.message);}
-}
-function onChatEnter(e){if(e.key==='Enter')sendChatMessage();}
-async function sendChatMessage(){
-  const input=document.getElementById('chatInput');const message=input.value.trim();if(!message||!currentPartner)return;
-  try{const d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,text:message})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');input.value='';await loadConversation();loadNotifications();}
-  catch(err){alert(err.message);}
-}
-document.addEventListener('click',e=>{
-  if(!e.target.closest('.notif-wrap'))document.getElementById('notifPanel').classList.remove('show');
-  if(!e.target.closest('.chat-wrap'))document.getElementById('chatListPanel').classList.remove('show');
-});
-loadNotifications();loadChatOverview();
-setInterval(()=>{loadNotifications();loadChatOverview();if(currentPartner)loadConversation();},10000);
-</script>
-</body>
-</html>
-'''
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
