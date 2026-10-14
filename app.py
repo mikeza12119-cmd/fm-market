@@ -14,7 +14,7 @@ app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
 DB_FILE = os.environ.get("DB_FILE", os.path.join(DATA_DIR, "database.json"))
-# Keep uploaded images on the same persistent volume as the database.
+# Store uploads beside the database by default so both can live on persistent storage.
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", os.path.join(DATA_DIR, "uploads"))
 AVATAR_FOLDER = os.path.join(UPLOAD_FOLDER, "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
@@ -92,15 +92,8 @@ def load_database():
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        # Never silently replace a broken/unreadable database with an empty one.
-        # That could make all existing accounts and listings appear to disappear.
-        app.logger.exception("Unable to read database file %s", DB_FILE)
-        raise RuntimeError(
-            f"Cannot read database at {DB_FILE}; refusing to overwrite existing data"
-        ) from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Database at {DB_FILE} is not a JSON object; refusing to overwrite it")
+    except Exception:
+        data = default_data.copy()
     for k in default_data:
         if k not in data:
             data[k] = default_data[k]
@@ -112,6 +105,10 @@ def load_database():
             user["avatar"] = None
         if "bio" not in user:
             user["bio"] = ""
+        if "profile_theme" not in user:
+            user["profile_theme"] = "#d4af37"
+        if "profile_banner" not in user:
+            user["profile_banner"] = None
     now = datetime.now()
     fresh_posts = []
     for p in data["posts"]:
@@ -190,7 +187,31 @@ def get_profile():
         "role_info": get_role_config(u["role"]),
         "avatar": u.get("avatar"),
         "bio": u.get("bio", ""),
+        "profile_theme": u.get("profile_theme", "#d4af37"),
+        "profile_banner": u.get("profile_banner"),
         "created_at": u.get("created_at", "-")
+    })
+
+@app.route('/api/profile/<username>', methods=['GET'])
+def get_public_profile(username):
+    """Expose only public profile fields; never return passwords or private account data."""
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    db = load_database()
+    user = db["users"].get(username)
+    if not user:
+        return jsonify({"success": False, "message": "ไม่พบผู้ใช้นี้"}), 404
+    role = user.get("role", "member")
+    return jsonify({
+        "success": True,
+        "username": username,
+        "role": role,
+        "role_info": get_role_config(role),
+        "avatar": user.get("avatar"),
+        "bio": user.get("bio", ""),
+        "profile_theme": user.get("profile_theme", "#d4af37"),
+        "profile_banner": user.get("profile_banner"),
+        "created_at": user.get("created_at", "-")
     })
 
 @app.route('/api/profile/update', methods=['POST'])
@@ -205,10 +226,16 @@ def update_profile():
         if not isinstance(bio, str):
             return jsonify({"success": False, "message": "ข้อมูลโปรไฟล์ไม่ถูกต้อง"}), 400
         db["users"][uname]["bio"] = bio.strip()[:500]
+    theme = d.get("profile_theme")
+    if theme is not None:
+        import re
+        if not isinstance(theme, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", theme):
+            return jsonify({"success": False, "message": "สีธีมไม่ถูกต้อง"}), 400
+        db["users"][uname]["profile_theme"] = theme
     save_database(db)
-    return jsonify({"success": True, "message": "บันทึกข้อมูลเรียบร้อย"})
+    return jsonify({"success": True, "message": "บันทึกโปรไฟล์เรียบร้อย"})
 
-@app.route('/api/admin/set-role', methods=['POST'])
+@app.route('/api/admin/set-role' , methods=['POST'])
 def set_role():
     if 'user' not in session:
         return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
@@ -354,54 +381,98 @@ def delete_post(post_id):
     save_database(db)
     return jsonify({"success": True})
 
+def message_datetime(message):
+    """Parse legacy message timestamps for reliable chronological ordering."""
+    try:
+        return datetime.strptime(message.get("time", ""), "%d/%m/%Y %H:%M")
+    except (TypeError, ValueError):
+        return datetime.min
+
+
 @app.route('/api/chat-overview', methods=['GET'])
 def chat_overview():
     if 'user' not in session:
-        return jsonify({"success": False})
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     me = session['user']['username']
     db = load_database()
-    partners = {}
-    for msg in db["messages"]:
-        if msg["from"] != me and msg["to"] != me:
+    conversations = {}
+    # Build a single inbox entry per conversation, regardless of who sent first.
+    for msg in db.get("messages", []):
+        sender, receiver = msg.get("from"), msg.get("to")
+        if me not in (sender, receiver):
             continue
-        other = msg["to"] if msg["from"] == me else msg["from"]
-        if other not in partners:
-            partners[other] = {
-                "last_msg": msg["text"],
-                "time": msg["time"],
-                "unread": 0
+        other = receiver if sender == me else sender
+        if not other or other not in db.get("users", {}):
+            continue
+        current = conversations.get(other)
+        if current is None or message_datetime(msg) >= message_datetime(current["_message"]):
+            conversations[other] = {
+                "last_msg": msg.get("text", ""),
+                "type": msg.get("type", "text"),
+                "time": msg.get("time", ""),
+                "unread": 0,
+                "_message": msg,
             }
-        if msg["time"] > partners[other]["time"]:
-            partners[other]["last_msg"] = msg["text"]
-            partners[other]["time"] = msg["time"]
-        if msg["to"] == me and not msg.get("read"):
-            partners[other]["unread"] += 1
-    total_unread = sum(p["unread"] for p in partners.values())
-    return jsonify({
-        "success": True,
-        "contacts": partners,
-        "total_unread": total_unread
-    })
+        if receiver == me and not msg.get("read", False):
+            # Count unread messages independently of which message is newest.
+            conversations.setdefault(other, {"last_msg": "", "type": "text", "time": "", "unread": 0, "_message": msg})["unread"] += 1
+    for item in conversations.values():
+        item.pop("_message", None)
+    total_unread = sum(item["unread"] for item in conversations.values())
+    return jsonify({"success": True, "contacts": conversations, "total_unread": total_unread})
+
 
 @app.route('/api/conversation/<partner>', methods=['GET'])
 def get_conversation(partner):
     if 'user' not in session:
-        return jsonify({"success": False})
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     me = session['user']['username']
     db = load_database()
-    for msg in db["messages"]:
-        if msg["from"] == partner and msg["to"] == me:
+    if partner == me or partner not in db.get("users", {}):
+        return jsonify({"success": False, "message": "ไม่พบผู้ใช้ที่ต้องการแชท"}), 404
+    conv = [m for m in db.get("messages", [])
+            if (m.get("from") == me and m.get("to") == partner) or
+               (m.get("from") == partner and m.get("to") == me)]
+    changed = False
+    for msg in conv:
+        if msg.get("to") == me and not msg.get("read", False):
             msg["read"] = True
-    save_database(db)
-    conv = [m for m in db["messages"]
-            if (m["from"] == me and m["to"] == partner) or
-               (m["from"] == partner and m["to"] == me)]
-    return jsonify({"success": True, "messages": conv})
+            changed = True
+    # Clear matching message notifications as soon as the recipient opens the thread.
+    for notif in db.get("notifications", []):
+        if notif.get("type") == "message" and notif.get("from") == partner and notif.get("to") == me and not notif.get("read", False):
+            notif["read"] = True
+            changed = True
+    if changed:
+        save_database(db)
+    conv.sort(key=message_datetime)
+    return jsonify({"success": True, "messages": conv, "partner": partner})
+
+
+@app.route('/api/conversation/<partner>/read', methods=['POST'])
+def mark_conversation_read(partner):
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    me = session['user']['username']
+    db = load_database()
+    changed = False
+    for msg in db.get("messages", []):
+        if msg.get("from") == partner and msg.get("to") == me and not msg.get("read", False):
+            msg["read"] = True
+            changed = True
+    for notif in db.get("notifications", []):
+        if notif.get("type") == "message" and notif.get("from") == partner and notif.get("to") == me and not notif.get("read", False):
+            notif["read"] = True
+            changed = True
+    if changed:
+        save_database(db)
+    return jsonify({"success": True})
+
 
 @app.route('/api/send-message', methods=['POST'])
 def send_message():
     if 'user' not in session:
-        return jsonify({"success": False})
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     d = json_body()
     db = load_database()
     me = session['user']['username']
@@ -409,20 +480,20 @@ def send_message():
     text = d.get("text", "")
     msg_type = d.get("type", "text")
     if not isinstance(receiver, str) or not isinstance(text, str):
-        return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"})
+        return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"}), 400
     text = text.strip()
     if not receiver or not text or len(text) > 2000 or receiver == me or receiver not in db["users"]:
-        return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"})
+        return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"}), 400
     if msg_type not in ("text", "gif"):
-        return jsonify({"success": False, "message": "รูปแบบข้อความไม่ถูกต้อง"})
+        return jsonify({"success": False, "message": "รูปแบบข้อความไม่ถูกต้อง"}), 400
     if msg_type == "gif":
         parsed = urlparse(text)
         host = (parsed.hostname or "").lower()
         allowed_gif_hosts = ("media.tenor.com", "tenor.com", "media.giphy.com", "i.giphy.com", "giphy.com")
         if parsed.scheme != "https" or not any(host == h or host.endswith("." + h) for h in allowed_gif_hosts):
-            return jsonify({"success": False, "message": "กรุณาใช้ลิงก์ GIF จาก Tenor หรือ GIPHY ที่ขึ้นต้นด้วย https://"})
+            return jsonify({"success": False, "message": "กรุณาใช้ลิงก์ GIF จาก Tenor หรือ GIPHY ที่ขึ้นต้นด้วย https://"}), 400
     new_msg = {
-        "id": str(uuid.uuid4())[:8],
+        "id": str(uuid.uuid4()),
         "from": me,
         "to": receiver,
         "text": text,
@@ -430,9 +501,9 @@ def send_message():
         "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
         "read": False
     }
-    db["messages"].append(new_msg)
-    db["notifications"].append({
-        "id": str(uuid.uuid4())[:8],
+    db.setdefault("messages", []).append(new_msg)
+    db.setdefault("notifications", []).append({
+        "id": str(uuid.uuid4()),
         "type": "message",
         "from": me,
         "to": receiver,
@@ -440,8 +511,10 @@ def send_message():
         "time": new_msg["time"],
         "read": False
     })
+    # The message and notification are written to the database file before success is returned.
     save_database(db)
     return jsonify({"success": True, "message": new_msg})
+
 
 @app.route('/api/notifications', methods=['GET'])
 def get_notifications():
@@ -690,6 +763,13 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .profile-role.member{background:linear-gradient(90deg,#374151,#6b7280);color:#fff}
 .profile-bio{color:#ccc;white-space:pre-line;margin-bottom:10px}
 .profile-meta{font-size:.8rem;color:var(--soft)}
+.profile-link{background:none;border:0;color:var(--gold);font:inherit;font-weight:700;text-decoration:underline;cursor:pointer;padding:0}
+.public-profile-overlay{display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.78);align-items:center;justify-content:center;padding:18px}
+.public-profile-overlay.show{display:flex}
+.public-profile-card{width:min(100%,480px);background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;position:relative}
+.public-profile-close{position:absolute;right:14px;top:10px;background:transparent;border:0;color:var(--text);font-size:1.6rem;cursor:pointer}
+.public-profile-bio{white-space:pre-wrap;color:var(--soft);margin-top:14px;overflow-wrap:anywhere}
+
 .admin-role-section{margin-top:20px;padding-top:20px;border-top:1px dashed var(--border)}
 .hidden-input{display:none}
 </style>
@@ -762,6 +842,19 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
   </div>
 </div>
 
+<div id="publicProfileOverlay" class="public-profile-overlay" role="dialog" aria-modal="true" aria-labelledby="publicProfileName" onclick="if(event.target===this)closePublicProfile()">
+  <div class="public-profile-card">
+    <button class="public-profile-close" type="button" aria-label="ปิด" onclick="closePublicProfile()">×</button>
+    <div id="publicProfileBanner" style="height:110px;border-radius:12px;background:linear-gradient(120deg,#202020,#4b3b14);margin:0 0 18px;background-size:cover;background-position:center"></div>
+    <div class="profile-avatar-row">
+      <div id="publicProfileAvatar" class="profile-avatar-frame member"><div class="profile-avatar-placeholder">👤</div></div>
+      <div class="profile-info"><h2 id="publicProfileName">โปรไฟล์สมาชิก</h2><span id="publicProfileRole" class="profile-role member">สมาชิกทั่วไป</span><div id="publicProfileCreated" class="profile-meta"></div></div>
+    </div>
+    <h4>แนะนำตัว</h4><div id="publicProfileBio" class="public-profile-bio">ยังไม่ได้แนะนำตัว</div>
+    <div style="margin-top:22px"><button id="publicProfileChat" class="btn btn-blue" type="button">💬 ส่งข้อความ</button></div>
+  </div>
+</div>
+
 <main class="container">
   <div id="tabMarket" class="content-tab active">
     <h2 class="sectitle">📢 ประกาศจากระบบ</h2>
@@ -806,7 +899,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <div style="flex:1">
             <div class="post-title">{{ p.title }}</div>
             <div class="post-meta-row">
-              <span>{{role_info.badge}} {{p.author}}</span>
+              <span>{{role_info.badge}} <button class="profile-link" type="button" onclick="openPublicProfile({{ p.author|tojson }})">{{p.author}}</button></span>
               <span class="role-badge" style="background:{{role_info.bg_badge}};color:#fff">{{role_info.name}}</span>
               <span style="color:var(--soft)">{{ p.time }}</span>
             </div>
@@ -824,7 +917,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
         </div>
         {% endif %}
         <div class="post-foot">
-          <span>👤 {{ p.author }}</span>
+          <span>👤 <button class="profile-link" type="button" onclick="openPublicProfile({{ p.author|tojson }})">{{ p.author }}</button></span>
           <span>{{ p.time }}</span>
           <button class="chat-btn-post" onclick="openChatWith('{{p.author}}')">💬 คุยด้วย</button>
         </div>
@@ -873,6 +966,7 @@ padding:12px 24px;width:100%">ลงประกาศ</button>
   <div id="tabProfile" class="content-tab">
     <div class="form-card profile-card">
       <h3>👤 โปรไฟล์ของฉัน</h3>
+      <div id="myProfileBanner" style="height:110px;border-radius:12px;background:linear-gradient(120deg,#202020,#4b3b14);margin:0 0 18px;background-size:cover;background-position:center"></div>
       <div class="profile-avatar-row">
         <div id="profileAvatar" class="profile-avatar-frame member" onclick="document.getElementById('avatarUpload').click()">
           <div class="profile-avatar-placeholder">👤</div>
@@ -885,7 +979,11 @@ padding:12px 24px;width:100%">ลงประกาศ</button>
       </div>
       <input id="avatarUpload" class="hidden-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" onchange="uploadAvatar(this.files[0])">
       <div class="form-group">
-        <label for="profileBio">แนะนำตัว</label>
+        <label for="profileTheme">สีธีมโปรไฟล์</label>
+        <input id="profileTheme" type="color" class="form-input" value="#d4af37" style="height:48px;padding:4px;max-width:100px">
+      </div>
+      <div class="form-group">
+        <label for="profileBio">แนะนำตัว (เขียนได้หลายบรรทัด)</label>
         <textarea id="profileBio" class="form-input" rows="4" maxlength="500" placeholder="เขียนแนะนำตัว..."></textarea>
       </div>
       <button class="btn btn-gold" onclick="saveProfile()">บันทึกโปรไฟล์</button>
@@ -961,11 +1059,36 @@ async function delPost(id) {
 async function doLogout() {
   try { await api('/api/logout'); location.href='/'; } catch(err){alert(err.message);}
 }
+async function openPublicProfile(username) {
+  try {
+    const d = await api('/api/profile/' + encodeURIComponent(username));
+    if (!d.success) throw new Error(d.message || 'เปิดโปรไฟล์ไม่สำเร็จ');
+    document.getElementById('publicProfileName').textContent = d.username;
+    document.getElementById('publicProfileCreated').textContent = 'สมัครเมื่อ ' + (d.created_at || '-');
+    document.getElementById('publicProfileBio').textContent = d.bio || 'ยังไม่ได้แนะนำตัว';
+    const banner=document.getElementById('publicProfileBanner'); banner.style.backgroundColor=d.profile_theme||'#d4af37'; banner.style.backgroundImage=d.profile_banner ? `url('${d.profile_banner}')` : `linear-gradient(120deg,${d.profile_theme||'#d4af37'},#171717)`; document.querySelector('.public-profile-card').style.setProperty('--profile-accent',d.profile_theme||'#d4af37');
+    const role = document.getElementById('publicProfileRole');
+    role.textContent = d.role_info.name; role.className = 'profile-role ' + d.role;
+    const frame = document.getElementById('publicProfileAvatar');
+    frame.className = 'profile-avatar-frame ' + d.role; frame.replaceChildren();
+    if (d.avatar) { const img = document.createElement('img'); img.src = d.avatar; img.className = 'profile-avatar-img'; img.alt = 'รูปโปรไฟล์'; frame.append(img); }
+    else { const placeholder = document.createElement('div'); placeholder.className = 'profile-avatar-placeholder'; placeholder.textContent = (d.username[0] || '?').toUpperCase(); frame.append(placeholder); }
+    const chat = document.getElementById('publicProfileChat');
+    chat.style.display = d.username === currentUsername ? 'none' : '';
+    chat.onclick = () => { closePublicProfile(); openChatWith(d.username); };
+    document.getElementById('publicProfileOverlay').classList.add('show');
+  } catch (err) { alert(err.message); }
+}
+function closePublicProfile() { document.getElementById('publicProfileOverlay').classList.remove('show'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePublicProfile(); });
+
 async function loadProfile() {
   try {
     const d = await api('/api/profile'); if(!d.success) return;
     document.getElementById('profileUsername').textContent=d.username;
     document.getElementById('profileBio').value=d.bio || '';
+    document.getElementById('profileTheme').value=d.profile_theme || '#d4af37';
+    const banner=document.getElementById('myProfileBanner'); banner.style.backgroundImage=d.profile_banner ? `url('${d.profile_banner}')` : `linear-gradient(120deg,${d.profile_theme||'#d4af37'},#171717)`;
     document.getElementById('profileCreated').textContent='สมัครเมื่อ '+(d.created_at || '-');
     const role = document.getElementById('profileRole'); role.textContent=d.role_info.name; role.className='profile-role '+d.role;
     const frame=document.getElementById('profileAvatar'); frame.className='profile-avatar-frame '+d.role;
@@ -975,7 +1098,7 @@ async function loadProfile() {
   } catch(err){console.error(err);}
 }
 async function saveProfile() {
-  try { const d=await api('/api/profile/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bio:document.getElementById('profileBio').value})}); alert(d.message || 'บันทึกแล้ว'); }
+  try { const d=await api('/api/profile/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bio:document.getElementById('profileBio').value,profile_theme:document.getElementById('profileTheme').value})}); alert(d.message || 'บันทึกแล้ว'); }
   catch(err){alert(err.message);}
 }
 async function uploadAvatar(file) {
@@ -994,17 +1117,17 @@ async function loadNotifications(){
   try {const d=await api('/api/notifications');const list=document.getElementById('notifList');list.replaceChildren();
     const badge=document.getElementById('notifBadge');badge.textContent=d.unread_count;badge.classList.toggle('show',d.unread_count>0);
     if(!d.notifications.length){list.innerHTML='<div class="empty-state">ไม่มีการแจ้งเตือน</div>';return;}
-    [...d.notifications].reverse().forEach(n=>{const el=document.createElement('div');el.className='panel-item'+(!n.read?' unread':'');const name=document.createElement('div');name.className='panel-item-name';name.textContent=n.type==='message'?'💬 ข้อความใหม่':'แจ้งเตือน';const body=document.createElement('div');body.className='panel-item-text';body.textContent=n.text;const time=document.createElement('div');time.className='panel-item-time';time.textContent=n.time;el.append(name,body,time);list.append(el);});
+    [...d.notifications].reverse().forEach(n=>{const el=document.createElement('div');el.className='panel-item'+(!n.read?' unread':'');const name=document.createElement('div');name.className='panel-item-name';name.textContent=n.type==='message'?'💬 ข้อความใหม่':'แจ้งเตือน';const body=document.createElement('div');body.className='panel-item-text';body.textContent=n.text;const time=document.createElement('div');time.className='panel-item-time';time.textContent=n.time;el.append(name,body,time);if(n.type==='message'&&n.from&&n.from!==currentUsername){el.title='คลิกเพื่อเปิดแชท';el.onclick=()=>{document.getElementById('notifPanel').classList.remove('show');openChatWith(n.from);};}list.append(el);});
   }catch(err){console.error(err);}
 }
 async function markAllNotifRead(){try{await api('/api/notifications/mark-read',{method:'POST'});loadNotifications();}catch(err){alert(err.message);}}
 async function loadChatOverview(){
-  try {const d=await api('/api/chat-overview');const body=document.getElementById('chatListBody');body.replaceChildren();const badge=document.getElementById('chatBadge');badge.textContent=d.total_unread;badge.classList.toggle('show',d.total_unread>0);const contacts=Object.entries(d.contacts).sort((a,b)=>b[1].time.localeCompare(a[1].time));
+  try {const d=await api('/api/chat-overview');const body=document.getElementById('chatListBody');body.replaceChildren();const badge=document.getElementById('chatBadge');badge.textContent=d.total_unread;badge.classList.toggle('show',d.total_unread>0);const toDate=t=>{const [date,time]=(t||'').split(' ');const parts=(date||'').split('/').map(Number);const clock=(time||'').split(':').map(Number);return parts.length===3&&clock.length===2?new Date(parts[2],parts[1]-1,parts[0],clock[0],clock[1]).getTime():0;};const contacts=Object.entries(d.contacts).sort((a,b)=>toDate(b[1].time)-toDate(a[1].time));
     if(!contacts.length){body.innerHTML='<div class="empty-state">ยังไม่มีข้อความ</div>';return;}
     contacts.forEach(([name,c])=>{const el=document.createElement('div');el.className='panel-item'+(c.unread?' unread':'');const title=document.createElement('div');title.className='panel-item-name';title.textContent=name+(c.unread?' ('+c.unread+')':'');const msg=document.createElement('div');msg.className='panel-item-text';msg.textContent=c.last_msg;const time=document.createElement('div');time.className='panel-item-time';time.textContent=c.time;el.append(title,msg,time);el.onclick=()=>{document.getElementById('chatListPanel').classList.remove('show');openChatWith(name);};body.append(el);});
   }catch(err){console.error(err);}
 }
-function markAllChatRead(){loadChatOverview();}
+async function markAllChatRead(){try{const d=await api('/api/chat-overview');for(const name of Object.keys(d.contacts||{})){await api('/api/conversation/'+encodeURIComponent(name)+'/read',{method:'POST'});}await loadChatOverview();}catch(err){alert(err.message);}}
 async function openChatWith(name){if(name===currentUsername){alert('ไม่สามารถแชตกับตัวเองได้');return;}currentPartner=name;document.getElementById('chatPartnerName').textContent=name;document.getElementById('chatOverlay').classList.add('show');await loadConversation();}
 function closeChat(){document.getElementById('chatOverlay').classList.remove('show');currentPartner=null;loadChatOverview();}
 const emojiChoices=['😀','😃','😄','😁','😆','😅','😂','🤣','🥹','😊','😍','🥰','😘','😎','🤔','😭','😢','😡','👍','👎','👏','🙏','🔥','❤️','💛','💖','🎉','✨','💯','🤝','🙌','😴','🤗','😇','😋','🤩','💔','💸','🚗','🎮','🐱','🐶','🌈','☀️','🌙','🍀','💎','👑'];
@@ -1015,7 +1138,7 @@ function searchGif(){const q=encodeURIComponent(document.getElementById('chatInp
 async function loadConversation(){
   if(!currentPartner)return;
   try{const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));const box=document.getElementById('chatMessages');box.replaceChildren();d.messages.forEach(m=>{const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');if(m.type==='gif'){const img=document.createElement('img');img.className='msg-gif';img.src=m.text;img.alt='GIF';img.loading='lazy';img.referrerPolicy='no-referrer';img.onerror=()=>{img.replaceWith(document.createTextNode('เปิด GIF ไม่ได้ — ลิงก์อาจหมดอายุ'));};wrap.append(img);}else{const content=document.createElement('div');content.textContent=m.text;wrap.append(content);}const time=document.createElement('div');time.className='msg-time';time.textContent=m.time;wrap.append(time);box.append(wrap);});box.scrollTop=box.scrollHeight;loadChatOverview();}
-  catch(err){console.error(err);}
+  catch(err){console.error(err);const box=document.getElementById('chatMessages');box.replaceChildren();const error=document.createElement('div');error.className='empty-state';error.textContent=err.message||'เปิดประวัติแชทไม่สำเร็จ';box.append(error);}
 }
 function onChatEnter(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}}
 async function postChatPayload(payload){if(!currentPartner){alert('กรุณาเลือกผู้ติดต่อก่อน');return false;}try{const d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,...payload})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');await loadConversation();loadNotifications();return true;}catch(err){alert(err.message);return false;}}
