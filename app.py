@@ -19,6 +19,7 @@ UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", os.path.join(DATA_DIR, "uploads"
 AVATAR_FOLDER = os.path.join(UPLOAD_FOLDER, "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 POST_LIFETIME_HOURS = 3
+APP_PATCH = "admin-bootstrap-one-time"
 
 os.makedirs(AVATAR_FOLDER, exist_ok=True)
 
@@ -70,6 +71,7 @@ def load_database():
         },
         "posts": [],
         "messages": [],
+        "mediation_rooms": [],
         "notifications": [],
         "news": [
             {"id": "n001", "title": "เปิดระบบ FM_Market", "date": "14 ตุลาคม 2026", "content": "ทุกฟีเจอร์ทำงานครบถ้วน"},
@@ -87,18 +89,60 @@ def load_database():
     }
     os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     if not os.path.exists(DB_FILE):
-        save_database(default_data)
-        return default_data
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = default_data.copy()
+        data = default_data
+    else:
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            # Do not overwrite a malformed existing database with defaults.
+            # Fail loudly so the operator can restore a backup safely.
+            raise RuntimeError(
+                f"Database file could not be read: {DB_FILE}. "
+                "Back up the file and repair/restore it before restarting."
+            )
     for k in default_data:
         if k not in data:
             data[k] = default_data[k]
+    # One-time admin bootstrap, controlled only through Render Environment.
+    # The password is hashed and is never stored in source code.
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+        data["settings"] = settings
+    bootstrap_username = os.environ.get("BOOTSTRAP_ADMIN_USERNAME", "").strip()
+    bootstrap_password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
+    if (bootstrap_username and bootstrap_password
+            and not settings.get("_admin_bootstrap_completed")):
+        users = data.get("users")
+        if not isinstance(users, dict):
+            users = {}
+            data["users"] = users
+        admin_user = users.get(bootstrap_username)
+        if not isinstance(admin_user, dict):
+            admin_user = {
+                "avatar": None,
+                "bio": "ผู้ดูแลระบบ FM_Market",
+                "created_at": datetime.now().strftime('%d/%m/%Y %H:%M'),
+                "profile_theme": "#d4af37",
+                "profile_banner": None,
+            }
+            users[bootstrap_username] = admin_user
+        admin_user["password"] = generate_password_hash(
+            bootstrap_password, method="pbkdf2:sha256"
+        )
+        admin_user["role"] = "admin"
+        admin_user.setdefault("avatar", None)
+        admin_user.setdefault("bio", "")
+        admin_user.setdefault("profile_theme", "#d4af37")
+        admin_user.setdefault("profile_banner", None)
+        admin_user.setdefault("created_at", datetime.now().strftime('%d/%m/%Y %H:%M'))
+        settings["_admin_bootstrap_completed"] = True
+
     for uname in data["users"]:
         user = data["users"][uname]
+        if not isinstance(user, dict):
+            continue
         if "role" not in user:
             user["role"] = "member"
         if "avatar" not in user:
@@ -112,6 +156,9 @@ def load_database():
     now = datetime.now()
     fresh_posts = []
     for p in data["posts"]:
+        if not isinstance(p, dict):
+            fresh_posts.append(p)
+            continue
         try:
             post_time = datetime.strptime(p["time"], '%d/%m/%Y %H:%M')
             if now - post_time <= timedelta(hours=POST_LIFETIME_HOURS):
@@ -460,10 +507,39 @@ def chat_overview():
         if receiver == me and not msg.get("read", False):
             # Count unread messages independently of which message is newest.
             conversations.setdefault(other, {"last_msg": "", "type": "text", "time": "", "unread": 0, "_message": msg})["unread"] += 1
-    for item in conversations.values():
+    for name, item in conversations.items():
         item.pop("_message", None)
+        user = db.get("users", {}).get(name, {})
+        item["avatar"] = user.get("avatar") if isinstance(user, dict) else None
+        item["role"] = user.get("role", "member") if isinstance(user, dict) else "member"
     total_unread = sum(item["unread"] for item in conversations.values())
     return jsonify({"success": True, "contacts": conversations, "total_unread": total_unread})
+
+
+@app.route('/api/chat-users', methods=['GET'])
+def chat_users():
+    """Search existing members so users can start a conversation without a prior message."""
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    db = load_database()
+    current = (session.get('user') or {}).get('username')
+    query = (request.args.get('q') or '').strip().casefold()[:60]
+    users = db.get("users", {})
+    results = []
+    if isinstance(users, dict):
+        for username, info in users.items():
+            if username == current or not isinstance(info, dict):
+                continue
+            if query and query not in str(username).casefold():
+                continue
+            results.append({
+                "username": username,
+                "avatar": info.get("avatar"),
+                "role": info.get("role", "member"),
+                "bio": str(info.get("bio", ""))[:120]
+            })
+    results.sort(key=lambda u: (not u["username"].casefold().startswith(query), u["username"].casefold()))
+    return jsonify({"success": True, "users": results[:30]})
 
 
 @app.route('/api/conversation/<partner>', methods=['GET'])
@@ -558,6 +634,181 @@ def send_message():
     # The message and notification are written to the database file before success is returned.
     save_database(db)
     return jsonify({"success": True, "message": new_msg})
+
+
+@app.route('/api/presence', methods=['POST'])
+def update_presence():
+    """Heartbeat used to determine which admins are currently online."""
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    me = (session.get('user') or {}).get('username')
+    db = load_database()
+    user = db.get('users', {}).get(me)
+    if not isinstance(user, dict):
+        session.clear()
+        return jsonify({"success": False, "message": "ไม่พบบัญชี กรุณาเข้าสู่ระบบใหม่"}), 401
+    user['_presence_at'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    save_database(db)
+    return jsonify({"success": True})
+
+
+def _parse_presence(value):
+    try:
+        return datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
+    except (TypeError, ValueError):
+        return None
+
+
+def _active_mediation_for_user(db, username):
+    return [r for r in db.get('mediation_rooms', [])
+            if isinstance(r, dict) and r.get('status') == 'active'
+            and username in r.get('participants', [])]
+
+
+@app.route('/api/mediation/available-admins', methods=['GET'])
+def mediation_available_admins():
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    db = load_database()
+    now = datetime.now()
+    busy = {r.get('admin') for r in db.get('mediation_rooms', [])
+            if isinstance(r, dict) and r.get('status') == 'active'}
+    admins = []
+    for username, user in db.get('users', {}).items():
+        if not isinstance(user, dict) or user.get('role') != 'admin':
+            continue
+        seen = _parse_presence(user.get('_presence_at'))
+        online = bool(seen and (now - seen).total_seconds() <= 75)
+        if online and username not in busy and username != (session.get('user') or {}).get('username'):
+            admins.append({"username": username, "avatar": user.get('avatar')})
+    return jsonify({"success": True, "admins": admins})
+
+
+@app.route('/api/mediation/create', methods=['POST'])
+def create_mediation():
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    d = json_body()
+    me = (session.get('user') or {}).get('username')
+    partner = d.get('partner')
+    if not isinstance(partner, str) or not partner or partner == me:
+        return jsonify({"success": False, "message": "กรุณาเลือกคู่สนทนาที่ถูกต้อง"}), 400
+    db = load_database()
+    users = db.get('users', {})
+    if me not in users or partner not in users:
+        return jsonify({"success": False, "message": "ไม่พบบัญชีผู้ใช้ในฐานข้อมูล"}), 404
+    existing = next((r for r in db.get('mediation_rooms', [])
+                     if isinstance(r, dict) and r.get('status') == 'active'
+                     and set(r.get('pair', [])) == {me, partner}), None)
+    if existing:
+        return jsonify({"success": True, "room": existing, "existing": True})
+    now = datetime.now()
+    busy = {r.get('admin') for r in db.get('mediation_rooms', [])
+            if isinstance(r, dict) and r.get('status') == 'active'}
+    available = []
+    for username, user in users.items():
+        if not isinstance(user, dict) or user.get('role') != 'admin' or username in busy:
+            continue
+        seen = _parse_presence(user.get('_presence_at'))
+        if seen and (now - seen).total_seconds() <= 75:
+            available.append(username)
+    if not available:
+        return jsonify({"success": False, "message": "ขณะนี้ไม่มีแอดมินที่ออนไลน์และว่าง กรุณาลองใหม่ภายหลัง"}), 409
+    available.sort(key=str.casefold)
+    admin = available[0]
+    room = {
+        "id": str(uuid.uuid4()),
+        "pair": [me, partner],
+        "admin": admin,
+        "participants": [me, partner, admin],
+        "status": "active",
+        "created_at": datetime.now().strftime('%d/%m/%Y %H:%M'),
+        "messages": []
+    }
+    db.setdefault('mediation_rooms', []).append(room)
+    db.setdefault('notifications', []).extend([
+        {"id": str(uuid.uuid4()), "type": "mediation", "from": me, "to": partner,
+         "text": f"{me} เชิญแอดมิน {admin} เข้าร่วมเป็นคนกลางในการซื้อขาย", "time": room['created_at'], "read": False},
+        {"id": str(uuid.uuid4()), "type": "mediation", "from": me, "to": admin,
+         "text": f"มีคำขอให้เป็นคนกลางระหว่าง {me} และ {partner}", "time": room['created_at'], "read": False}
+    ])
+    save_database(db)
+    return jsonify({"success": True, "room": room})
+
+
+@app.route('/api/mediation/active', methods=['GET'])
+def active_mediations():
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    me = (session.get('user') or {}).get('username')
+    db = load_database()
+    rooms = []
+    for room in db.get('mediation_rooms', []):
+        if isinstance(room, dict) and room.get('status') == 'active' and me in room.get('participants', []):
+            rooms.append({k: room.get(k) for k in ('id', 'pair', 'admin', 'participants', 'status', 'created_at')})
+    return jsonify({"success": True, "rooms": rooms})
+
+
+@app.route('/api/mediation/<room_id>', methods=['GET'])
+def get_mediation(room_id):
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    me = (session.get('user') or {}).get('username')
+    db = load_database()
+    room = next((r for r in db.get('mediation_rooms', []) if isinstance(r, dict) and r.get('id') == room_id), None)
+    if not room or me not in room.get('participants', []):
+        return jsonify({"success": False, "message": "ไม่พบห้องคนกลาง"}), 404
+    if room.get('status') != 'active':
+        return jsonify({"success": False, "ended": True, "message": "การซื้อขายนี้สิ้นสุดแล้ว"}), 410
+    return jsonify({"success": True, "room": room, "is_admin": me == room.get('admin')})
+
+
+@app.route('/api/mediation/<room_id>/message', methods=['POST'])
+def send_mediation_message(room_id):
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    me = (session.get('user') or {}).get('username')
+    d = json_body()
+    text = d.get('text', '')
+    if not isinstance(text, str) or not text.strip() or len(text.strip()) > 2000:
+        return jsonify({"success": False, "message": "ข้อความต้องมีความยาว 1–2000 ตัวอักษร"}), 400
+    db = load_database()
+    room = next((r for r in db.get('mediation_rooms', []) if isinstance(r, dict) and r.get('id') == room_id), None)
+    if not room or me not in room.get('participants', []):
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์เข้าถึงห้องนี้"}), 403
+    if room.get('status') != 'active':
+        return jsonify({"success": False, "message": "ห้องนี้สิ้นสุดการซื้อขายแล้ว"}), 410
+    msg = {"id": str(uuid.uuid4()), "from": me, "text": text.strip(),
+           "time": datetime.now().strftime('%d/%m/%Y %H:%M')}
+    room.setdefault('messages', []).append(msg)
+    save_database(db)
+    return jsonify({"success": True, "message": msg})
+
+
+@app.route('/api/mediation/<room_id>/end', methods=['POST'])
+def end_mediation(room_id):
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    me = (session.get('user') or {}).get('username')
+    db = load_database()
+    room = next((r for r in db.get('mediation_rooms', []) if isinstance(r, dict) and r.get('id') == room_id), None)
+    if not room or me not in room.get('participants', []):
+        return jsonify({"success": False, "message": "ไม่พบห้องคนกลาง"}), 404
+    # Only the assigned admin can end the sale; participants cannot bypass the UI.
+    if me != room.get('admin'):
+        return jsonify({"success": False, "message": "เฉพาะแอดมินคนกลางที่ได้รับมอบหมายเท่านั้นที่จบการขายได้"}), 403
+    if room.get('status') != 'active':
+        return jsonify({"success": True, "already_ended": True})
+    room['status'] = 'ended'
+    room['ended_at'] = datetime.now().strftime('%d/%m/%Y %H:%M')
+    room['ended_by'] = me
+    for username in room.get('participants', []):
+        db.setdefault('notifications', []).append({
+            "id": str(uuid.uuid4()), "type": "mediation_ended", "from": me, "to": username,
+            "text": f"แอดมิน {me} จบการขายแล้ว ห้องคนกลางถูกปิด", "time": room['ended_at'], "read": False
+        })
+    save_database(db)
+    return jsonify({"success": True, "message": "จบการขายและปิดห้องคนกลางแล้ว"})
 
 
 @app.route('/api/notifications', methods=['GET'])
@@ -679,7 +930,7 @@ async function doR(e){
 </html>
 '''
 
-MAIN_PAGE = '''
+MAIN_PAGE = r'''
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -720,7 +971,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .panel-item.unread{background:rgba(212,175,55,.12);border-left:3px solid var(--gold)}
 .panel-item-name{font-weight:600;font-size:.9rem}
 .panel-item-text{font-size:.85rem;color:var(--soft);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.panel-item-time{font-size:.7rem;color:#555;margin-top:4px}
+.panel-item-time{display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:4px 9px;border:1px solid rgba(212,175,55,.18);border-radius:999px;background:rgba(212,175,55,.08);color:#c9b77d;font-size:.72rem;line-height:1.2;font-weight:500;letter-spacing:.01em}.panel-item-time::before{content:"◷";font-size:.82rem;opacity:.9}.panel-item.unread .panel-item-time{background:rgba(212,175,55,.14);color:#f0d98a}
 .empty-state{padding:30px;text-align:center;color:var(--soft);font-size:.9rem}
 .chat-overlay{position:fixed;inset:0;background:transparent;z-index:3000;display:none;align-items:flex-end;justify-content:flex-end;padding:88px 22px 86px;pointer-events:none}
 .chat-overlay.show{display:flex}
@@ -734,6 +985,11 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .msg-other{background:#252535;color:#f5f5f8;align-self:flex-start;border-bottom-left-radius:5px}
 .msg-time{font-size:.68rem;color:var(--soft);margin-top:4px;text-align:right}
 .msg-gif{display:block;width:min(230px,65vw);max-height:220px;object-fit:contain;border-radius:12px;background:#15151e}
+.mediation-controls{display:flex;gap:7px;flex-wrap:wrap;padding:9px 10px;border-bottom:1px solid var(--border);background:#15151f}
+.mediation-invite-btn,.mediation-end-btn,.mediation-leave-btn{border:1px solid rgba(212,175,55,.35);border-radius:10px;padding:8px 10px;font-size:.78rem;font-weight:700;cursor:pointer;background:rgba(212,175,55,.1);color:#f3d875}
+.mediation-end-btn{background:linear-gradient(90deg,#16804a,#22a05a);border-color:#22a05a;color:white}
+.mediation-leave-btn{background:#252535;color:#ddd;border-color:#38384a}
+.mediation-info{width:100%;font-size:.75rem;color:#c8c8d5;line-height:1.5}
 .chat-input-area{display:flex;align-items:center;gap:7px;padding:10px;border-top:1px solid var(--border);background:#12121a}
 .chat-input-area input{min-width:0;flex:1;background:#0a0a10;border:1px solid var(--border);border-radius:18px;padding:10px 13px;color:var(--text);font-size:.9rem}
 .chat-tool-btn{flex:0 0 auto;border:1px solid #333348;background:#20202d;color:#f6d86a;border-radius:50%;width:36px;height:36px;cursor:pointer;font-weight:800}
@@ -747,8 +1003,33 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .gif-help{width:100%;font-size:.72rem;color:var(--soft)}
 .chat-launcher{position:fixed;right:22px;bottom:20px;z-index:2999;width:58px;height:58px;border:2px solid rgba(255,255,255,.18);border-radius:50%;background:linear-gradient(135deg,#d4af37,#f0c808);color:#17130a;font-size:1.55rem;box-shadow:0 8px 25px rgba(0,0,0,.45);cursor:pointer;transition:transform .2s}
 .chat-launcher:hover{transform:translateY(-3px) scale(1.03)}
-.chat-wrap .dropdown-panel{position:fixed;top:auto;right:22px;bottom:88px;width:min(340px,calc(100vw - 28px));max-height:min(480px,calc(100vh - 130px))}
-@media(max-width:520px){.chat-overlay{padding:12px 8px 86px}.chat-window{height:min(70vh,560px);width:calc(100vw - 16px)}.chat-launcher{right:15px;bottom:15px}}
+.chat-wrap .dropdown-panel{position:fixed;top:auto;right:22px;bottom:88px;width:min(360px,calc(100vw - 28px));max-height:min(520px,calc(100vh - 130px))}
+.chat-search-wrap{padding:10px 12px;border-bottom:1px solid var(--border);background:#101018}
+.chat-search{width:100%;border:1px solid #303044;border-radius:999px;padding:10px 14px;background:#20202d;color:var(--text);outline:none;font-size:.88rem}
+.chat-search:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.1)}
+.chat-list-caption{padding:8px 14px 2px;color:var(--soft);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}
+.chat-contact-row{display:flex;align-items:center;gap:11px;padding:11px 13px;border-bottom:1px solid rgba(40,40,56,.75);cursor:pointer;transition:background .15s}
+.chat-contact-row:hover{background:rgba(212,175,55,.08)}
+.chat-contact-row.unread{background:rgba(212,175,55,.08)}
+.chat-contact-avatar{width:44px;height:44px;flex:0 0 44px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#38384d,#181824);border:1px solid #3b3b4d;overflow:hidden;font-weight:800;color:#f5d66c}
+.chat-contact-avatar img{width:100%;height:100%;object-fit:cover}
+.chat-contact-main{min-width:0;flex:1}
+.chat-contact-top{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.chat-contact-name{font-size:.9rem;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-contact-time{font-size:.68rem;color:var(--soft);white-space:nowrap}
+.chat-contact-preview{font-size:.78rem;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+.chat-unread-dot{width:9px;height:9px;border-radius:50%;background:#3b82f6;flex:0 0 9px}
+.chat-header-user{display:flex;align-items:center;gap:10px;min-width:0}
+.chat-header-avatar{width:40px;height:40px;flex:0 0 40px;border-radius:50%;background:#2b2b3b;overflow:hidden;display:flex;align-items:center;justify-content:center;font-weight:800;color:#f0d36c}
+.chat-header-avatar img{width:100%;height:100%;object-fit:cover}
+.chat-header-copy{min-width:0}
+.chat-header-copy .panel-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-subtitle{font-size:.7rem;color:var(--soft)}
+.msg-day-divider{text-align:center;color:var(--soft);font-size:.72rem;margin:8px 0}
+.msg-receipt{font-size:.68rem;color:#b5b5c5;text-align:right;margin-top:2px}
+.msg-me .msg-time{color:rgba(20,17,8,.7)}
+@media(max-width:520px){.chat-overlay{padding:12px 8px 86px}.chat-window{height:min(78vh,650px);width:calc(100vw - 16px)}.chat-launcher{right:15px;bottom:15px}.chat-wrap .dropdown-panel{right:8px;bottom:82px}}
+
 .container{max-width:1200px;margin:0 auto;padding:24px 20px}
 .sectitle{font-size:1.3rem;font-weight:800;margin:28px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .alert-block{background:linear-gradient(90deg,rgba(196,30,58,.08),rgba(212,175,55,.05));border:1px solid rgba(212,175,55,.3);border-radius:var(--r);padding:20px;margin-bottom:30px}
@@ -841,8 +1122,11 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
         <button class="bell-btn" onclick="toggleChatList()">💬<span id="chatBadge" class="badge-count">0</span></button>
         <div id="chatListPanel" class="dropdown-panel">
           <div class="panel-head">
-            <span class="panel-title">💬 ข้อความ</span>
-            <div class="panel-actions"><button onclick="markAllChatRead()">อ่านทั้งหมด</button></div>
+            <span class="panel-title">💬 Messenger</span>
+            <div class="panel-actions"><button type="button" onclick="clearChatSearch()">แชทล่าสุด</button></div>
+          </div>
+          <div class="chat-search-wrap">
+            <input id="chatSearch" class="chat-search" type="search" placeholder="ค้นหาสมาชิกเพื่อเริ่มแชท..." autocomplete="off" oninput="searchChatUsers()" aria-label="ค้นหาสมาชิกสำหรับแชท">
           </div>
           <div id="chatListBody" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
         </div>
@@ -866,8 +1150,17 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 <div id="chatOverlay" class="chat-overlay">
   <div class="chat-window" onclick="event.stopPropagation()">
     <div class="chat-header">
-      <div><div id="chatPartnerName" class="panel-title">แชท</div><div style="font-size:.72rem;color:var(--soft)">FM_Market Messenger</div></div>
+      <div class="chat-header-user">
+        <div id="chatPartnerAvatar" class="chat-header-avatar">👤</div>
+        <div class="chat-header-copy"><div id="chatPartnerName" class="panel-title">แชท</div><div id="chatPartnerSubtitle" class="chat-subtitle">FM_Market Messenger · บันทึกประวัติอัตโนมัติ</div></div>
+      </div>
       <button class="chat-close" onclick="closeChat()" aria-label="ปิดแชท">×</button>
+    </div>
+    <div id="mediationControls" class="mediation-controls">
+      <button id="inviteAdminBtn" class="mediation-invite-btn" type="button" onclick="inviteMediator()">🛡️ เชิญแอดมินเป็นคนกลาง</button>
+      <button id="endSaleBtn" class="mediation-end-btn" type="button" onclick="endMediatedSale()" hidden>✓ จบการขาย</button>
+      <button id="leaveMediationBtn" class="mediation-leave-btn" type="button" onclick="leaveMediationRoom()" hidden>กลับไปแชทส่วนตัว</button>
+      <div id="mediationInfo" class="mediation-info" hidden></div>
     </div>
     <div id="chatMessages" class="chat-messages"><div class="empty-state">เลือกผู้ติดต่อเพื่อเริ่มแชท</div></div>
     <div id="emojiPicker" class="emoji-picker" aria-label="เลือกอีโมจิ"></div>
@@ -963,7 +1256,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
         <div class="post-foot">
           <span>👤 <button class="profile-link" type="button" onclick="openPublicProfile({{ p.author|tojson }})">{{ p.author }}</button></span>
           <span>{{ p.time }}</span>
-          <button class="chat-btn-post" onclick="openChatWith('{{p.author}}')">💬 คุยด้วย</button>
+          <button class="chat-btn-post" onclick="openChatWith({{ p.author|tojson }})">💬 คุยด้วย</button>
         </div>
       </div>
       {% endfor %}
@@ -1046,6 +1339,9 @@ padding:12px 24px;width:100%">ลงประกาศ</button>
 <script>
 let uploadedImages = [];
 let currentPartner = null;
+let currentMediationId = null;
+let currentMediationAdmin = false;
+let presenceBusy = false;
 const currentUsername = {{ session_user.username|tojson }};
 
 function showTab(tab) {
@@ -1157,43 +1453,251 @@ async function setUserRole() {
 }
 function toggleNotif(){document.getElementById('notifPanel').classList.toggle('show');loadNotifications();}
 function toggleChatList(){document.getElementById('chatListPanel').classList.toggle('show');loadChatOverview();}
+// Render stored server timestamps (DD/MM/YYYY HH:mm) as friendly Thai time.
+// Render runs in UTC, so interpret the stored value as UTC and display Asia/Bangkok.
+function parseNotificationTime(raw){
+  const match=/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/.exec(String(raw||'').trim());
+  if(!match)return null;
+  const [,dd,mm,yyyy,hh,min]=match;
+  const date=new Date(Date.UTC(Number(yyyy),Number(mm)-1,Number(dd),Number(hh),Number(min)));
+  return Number.isNaN(date.getTime())?null:date;
+}
+function formatNotificationTime(raw){
+  const date=parseNotificationTime(raw);
+  if(!date)return 'เวลาไม่พร้อมใช้งาน';
+  const now=Date.now();
+  const diff=Math.max(0,now-date.getTime());
+  const bangkokDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit'});
+  const bangkokClock=new Intl.DateTimeFormat('th-TH',{timeZone:'Asia/Bangkok',hour:'2-digit',minute:'2-digit',hour12:false});
+  const clock=bangkokClock.format(date);
+  if(diff<60*1000)return 'เมื่อสักครู่';
+  if(diff<60*60*1000)return Math.floor(diff/60000)+' นาทีที่แล้ว';
+  if(diff<24*60*60*1000 && bangkokDate.format(date)===bangkokDate.format(new Date()))return Math.floor(diff/3600000)+' ชั่วโมงที่แล้ว';
+  const today=bangkokDate.format(new Date());
+  const yesterday=bangkokDate.format(new Date(now-24*60*60*1000));
+  if(bangkokDate.format(date)===today)return 'วันนี้ เวลา '+clock;
+  if(bangkokDate.format(date)===yesterday)return 'เมื่อวาน เวลา '+clock;
+  return new Intl.DateTimeFormat('th-TH',{timeZone:'Asia/Bangkok',day:'numeric',month:'short',year:'numeric'}).format(date)+' • '+clock;
+}
 async function loadNotifications(){
-  try {const d=await api('/api/notifications');const list=document.getElementById('notifList');list.replaceChildren();
-    const badge=document.getElementById('notifBadge');badge.textContent=d.unread_count;badge.classList.toggle('show',d.unread_count>0);
+  try {
+    const d=await api('/api/notifications');
+    const list=document.getElementById('notifList');
+    list.replaceChildren();
+    const badge=document.getElementById('notifBadge');
+    badge.textContent=d.unread_count;
+    badge.classList.toggle('show',d.unread_count>0);
     if(!d.notifications.length){list.innerHTML='<div class="empty-state">ไม่มีการแจ้งเตือน</div>';return;}
-    [...d.notifications].reverse().forEach(n=>{const el=document.createElement('div');el.className='panel-item'+(!n.read?' unread':'');const name=document.createElement('div');name.className='panel-item-name';name.textContent=n.type==='message'?'💬 ข้อความใหม่':'แจ้งเตือน';const body=document.createElement('div');body.className='panel-item-text';body.textContent=n.text;const time=document.createElement('div');time.className='panel-item-time';time.textContent=n.time;el.append(name,body,time);if(n.type==='message'&&n.from&&n.from!==currentUsername){el.title='คลิกเพื่อเปิดแชท';el.onclick=()=>{document.getElementById('notifPanel').classList.remove('show');openChatWith(n.from);};}list.append(el);});
+    [...d.notifications].reverse().forEach(n=>{
+      const el=document.createElement('div');
+      el.className='panel-item'+(!n.read?' unread':'');
+      const name=document.createElement('div');
+      name.className='panel-item-name';
+      name.textContent=n.type==='message'?'💬 ข้อความใหม่':'แจ้งเตือน';
+      const body=document.createElement('div');
+      body.className='panel-item-text';
+      body.textContent=n.text;
+      const time=document.createElement('div');
+      time.className='panel-item-time';
+      time.textContent=formatNotificationTime(n.time);
+      time.title=parseNotificationTime(n.time)?'เวลาประเทศไทย: '+new Intl.DateTimeFormat('th-TH',{timeZone:'Asia/Bangkok',dateStyle:'medium',timeStyle:'short'}).format(parseNotificationTime(n.time)):'ไม่พบเวลาที่บันทึกไว้';
+      el.append(name,body,time);
+      if(n.type==='message'&&n.from&&n.from!==currentUsername){
+        el.title='คลิกเพื่อเปิดแชท';
+        el.onclick=()=>{document.getElementById('notifPanel').classList.remove('show');openChatWith(n.from);};
+      }
+      list.append(el);
+    });
   }catch(err){console.error(err);}
 }
 async function markAllNotifRead(){try{await api('/api/notifications/mark-read',{method:'POST'});loadNotifications();}catch(err){alert(err.message);}}
+function chatAvatarNode(avatar, username, className='chat-contact-avatar'){
+  const node=document.createElement('div');node.className=className;
+  if(avatar){const img=document.createElement('img');img.src=avatar;img.alt='';img.loading='lazy';img.onerror=()=>{node.textContent=(username||'?').slice(0,1).toUpperCase();};node.append(img);}
+  else node.textContent=(username||'?').slice(0,1).toUpperCase();
+  return node;
+}
+function chatTimeLabel(raw){
+  const d=parseNotificationTime(raw);
+  if(!d)return '';
+  return new Intl.DateTimeFormat('th-TH',{timeZone:'Asia/Bangkok',hour:'2-digit',minute:'2-digit',hour12:false}).format(d);
+}
+function renderChatContact({username,avatar,last_msg='',time='',unread=0,role='member',isSearch=false}){
+  const row=document.createElement('div');row.className='chat-contact-row'+(unread?' unread':'');row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-label','เปิดแชทกับ '+username);
+  row.append(chatAvatarNode(avatar,username));
+  const main=document.createElement('div');main.className='chat-contact-main';
+  const top=document.createElement('div');top.className='chat-contact-top';
+  const name=document.createElement('div');name.className='chat-contact-name';name.textContent=username;
+  const timeNode=document.createElement('div');timeNode.className='chat-contact-time';timeNode.textContent=isSearch?(role==='admin'?'ผู้ดูแลระบบ':role==='vip'?'VIP':'สมาชิก'):formatNotificationTime(time);
+  top.append(name,timeNode);
+  const preview=document.createElement('div');preview.className='chat-contact-preview';preview.textContent=isSearch?(last_msg||'เริ่มบทสนทนาใหม่'):((last_msg||'เริ่มคุยกัน').slice(0,100));
+  main.append(top,preview);row.append(main);
+  if(unread){const dot=document.createElement('span');dot.className='chat-unread-dot';dot.title='มีข้อความที่ยังไม่ได้อ่าน';row.append(dot);}
+  const open=()=>{document.getElementById('chatListPanel').classList.remove('show');openChatWith(username,avatar);};row.onclick=open;row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}};
+  return row;
+}
 async function loadChatOverview(){
-  try {const d=await api('/api/chat-overview');const body=document.getElementById('chatListBody');body.replaceChildren();const badge=document.getElementById('chatBadge');badge.textContent=d.total_unread;badge.classList.toggle('show',d.total_unread>0);const toDate=t=>{const [date,time]=(t||'').split(' ');const parts=(date||'').split('/').map(Number);const clock=(time||'').split(':').map(Number);return parts.length===3&&clock.length===2?new Date(parts[2],parts[1]-1,parts[0],clock[0],clock[1]).getTime():0;};const contacts=Object.entries(d.contacts).sort((a,b)=>toDate(b[1].time)-toDate(a[1].time));
-    if(!contacts.length){body.innerHTML='<div class="empty-state">ยังไม่มีข้อความ</div>';return;}
-    contacts.forEach(([name,c])=>{const el=document.createElement('div');el.className='panel-item'+(c.unread?' unread':'');const title=document.createElement('div');title.className='panel-item-name';title.textContent=name+(c.unread?' ('+c.unread+')':'');const msg=document.createElement('div');msg.className='panel-item-text';msg.textContent=c.last_msg;const time=document.createElement('div');time.className='panel-item-time';time.textContent=c.time;el.append(title,msg,time);el.onclick=()=>{document.getElementById('chatListPanel').classList.remove('show');openChatWith(name);};body.append(el);});
+  try{
+    const d=await api('/api/chat-overview');
+    const body=document.getElementById('chatListBody');if(!body)return;
+    const search=document.getElementById('chatSearch');if(search&&search.value.trim())return;
+    body.replaceChildren();
+    const badge=document.getElementById('chatBadge');badge.textContent=d.total_unread||0;badge.classList.toggle('show',(d.total_unread||0)>0);
+    const contacts=Object.entries(d.contacts||{}).sort((a,b)=>{
+      const ad=parseNotificationTime(a[1].time)?.getTime()||0;const bd=parseNotificationTime(b[1].time)?.getTime()||0;return bd-ad;
+    });
+    if(!contacts.length){const empty=document.createElement('div');empty.className='empty-state';empty.textContent='ยังไม่มีแชท — ค้นหาสมาชิกด้านบนเพื่อเริ่มคุย';body.append(empty);return;}
+    const cap=document.createElement('div');cap.className='chat-list-caption';cap.textContent='บทสนทนาล่าสุด';body.append(cap);
+    contacts.forEach(([username,c])=>body.append(renderChatContact({username,avatar:c.avatar,last_msg:c.last_msg,time:c.time,unread:c.unread,role:c.role})));
   }catch(err){console.error(err);}
 }
+let chatSearchRequest=0;
+async function searchChatUsers(){
+  const input=document.getElementById('chatSearch');const q=input.value.trim();
+  if(!q){await loadChatOverview();return;}
+  const requestId=++chatSearchRequest;const body=document.getElementById('chatListBody');body.replaceChildren();
+  const loading=document.createElement('div');loading.className='empty-state';loading.textContent='กำลังค้นหาสมาชิก...';body.append(loading);
+  try{
+    const d=await api('/api/chat-users?q='+encodeURIComponent(q));if(requestId!==chatSearchRequest)return;
+    body.replaceChildren();const users=d.users||[];
+    if(!users.length){const empty=document.createElement('div');empty.className='empty-state';empty.textContent='ไม่พบสมาชิกที่ตรงกับคำค้น';body.append(empty);return;}
+    const cap=document.createElement('div');cap.className='chat-list-caption';cap.textContent='สมาชิกที่ค้นพบ';body.append(cap);
+    users.forEach(u=>body.append(renderChatContact({username:u.username,avatar:u.avatar,role:u.role,last_msg:u.bio||'เริ่มบทสนทนาใหม่',isSearch:true})));
+  }catch(err){if(requestId!==chatSearchRequest)return;body.replaceChildren();const empty=document.createElement('div');empty.className='empty-state';empty.textContent=err.message||'ค้นหาสมาชิกไม่สำเร็จ';body.append(empty);}
+}
+function clearChatSearch(){const input=document.getElementById('chatSearch');if(input)input.value='';chatSearchRequest++;loadChatOverview();}
 async function markAllChatRead(){try{const d=await api('/api/chat-overview');for(const name of Object.keys(d.contacts||{})){await api('/api/conversation/'+encodeURIComponent(name)+'/read',{method:'POST'});}await loadChatOverview();}catch(err){alert(err.message);}}
-async function openChatWith(name){if(name===currentUsername){alert('ไม่สามารถแชตกับตัวเองได้');return;}currentPartner=name;document.getElementById('chatPartnerName').textContent=name;document.getElementById('chatOverlay').classList.add('show');await loadConversation();}
-function closeChat(){document.getElementById('chatOverlay').classList.remove('show');currentPartner=null;loadChatOverview();}
+function setMediationControls(mode, room=null){
+  const invite=document.getElementById('inviteAdminBtn');
+  const end=document.getElementById('endSaleBtn');
+  const leave=document.getElementById('leaveMediationBtn');
+  const info=document.getElementById('mediationInfo');
+  invite.hidden=mode!=='private';
+  end.hidden=mode!=='room'||!currentMediationAdmin;
+  leave.hidden=mode!=='room';
+  info.hidden=mode!=='room';
+  if(room&&mode==='room') info.textContent='ห้องคนกลาง · แอดมิน '+room.admin+' · ผู้ซื้อ/ผู้ขาย: '+(room.pair||[]).join(' และ ')+' · ห้องจะปิดได้เมื่อแอดมินกด “จบการขาย”';
+  if(mode==='private') info.textContent='';
+}
+async function inviteMediator(){
+  if(!currentPartner||currentMediationId){alert('กรุณาเปิดแชทส่วนตัวกับผู้ซื้อหรือผู้ขายก่อน');return;}
+  const btn=document.getElementById('inviteAdminBtn');btn.disabled=true;
+  try{
+    const d=await api('/api/mediation/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({partner:currentPartner})});
+    if(!d.success)throw new Error(d.message||'เชิญแอดมินไม่สำเร็จ');
+    await openMediationRoom(d.room.id);
+    await loadMyMediationRooms();
+  }catch(err){alert(err.message||'ขณะนี้ไม่มีแอดมินว่าง');}
+  finally{btn.disabled=false;}
+}
+async function openMediationRoom(roomId){
+  try{
+    const d=await api('/api/mediation/'+encodeURIComponent(roomId));
+    currentMediationId=roomId;currentMediationAdmin=!!d.is_admin;
+    const room=d.room;
+    currentPartner=(room.pair||[]).find(name=>name!==currentUsername)||null;
+    document.getElementById('chatPartnerName').textContent='🛡️ ห้องคนกลางซื้อขาย';
+    document.getElementById('chatPartnerAvatar').textContent='🛡️';
+    document.getElementById('chatPartnerSubtitle').textContent='ผู้ซื้อ + ผู้ขาย + แอดมินคนกลาง';
+    document.getElementById('chatOverlay').classList.add('show');
+    setMediationControls('room',room);
+    const input=document.getElementById('chatInput');input.placeholder='พิมพ์ข้อความถึงทุกคนในห้อง...';input.disabled=false;
+    await loadMediationConversation();input.focus();
+  }catch(err){alert(err.message||'เปิดห้องคนกลางไม่สำเร็จ');}
+}
+async function loadMediationConversation(){
+  if(!currentMediationId)return;
+  try{
+    const d=await api('/api/mediation/'+encodeURIComponent(currentMediationId));
+    const box=document.getElementById('chatMessages');const near=box.scrollHeight-box.scrollTop-box.clientHeight<110;
+    const room=d.room;currentMediationAdmin=!!d.is_admin;setMediationControls('room',room);box.replaceChildren();
+    const messages=room.messages||[];
+    if(!messages.length){const empty=document.createElement('div');empty.className='empty-state';empty.textContent='เริ่มการพูดคุยได้เลย ทุกข้อความจะมองเห็นโดยผู้ซื้อ ผู้ขาย และแอดมินคนกลาง';box.append(empty);}
+    messages.forEach(m=>{
+      const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');
+      const sender=document.createElement('div');sender.style.cssText='font-size:.68rem;font-weight:800;margin-bottom:4px;opacity:.8';sender.textContent=m.from+(m.from===room.admin?' · แอดมินคนกลาง':'');wrap.append(sender);
+      const content=document.createElement('div');content.textContent=m.text;wrap.append(content);
+      const time=document.createElement('div');time.className='msg-time';time.textContent=formatNotificationTime(m.time);wrap.append(time);box.append(wrap);
+    });
+    if(near)box.scrollTop=box.scrollHeight;
+  }catch(err){
+    if(err.message&&/สิ้นสุด|ไม่พบห้อง/.test(err.message)){currentMediationId=null;currentMediationAdmin=false;document.getElementById('chatMessages').innerHTML='<div class="empty-state">การขายสิ้นสุดแล้ว ห้องคนกลางถูกปิด</div>';currentPartner=null;setMediationControls('closed');document.getElementById('chatInput').disabled=true;document.getElementById('chatInput').placeholder='ห้องนี้ปิดแล้ว';await loadMyMediationRooms();return;}
+    console.error(err);
+  }
+}
+async function loadMyMediationRooms(){
+  try{
+    const d=await api('/api/mediation/active');
+    const body=document.getElementById('chatListBody');if(!body)return;
+    const old=document.getElementById('mediationRoomList');if(old)old.remove();
+    if(!d.rooms||!d.rooms.length)return;
+    const wrap=document.createElement('div');wrap.id='mediationRoomList';wrap.style.cssText='padding:10px 12px;border-bottom:1px solid var(--border);background:rgba(212,175,55,.07)';
+    const title=document.createElement('div');title.className='chat-list-caption';title.textContent='🛡️ ห้องคนกลางที่กำลังดำเนินการ';wrap.append(title);
+    d.rooms.forEach(room=>{const b=document.createElement('button');b.type='button';b.className='mediation-invite-btn';b.style.cssText='display:block;width:100%;text-align:left;margin-top:6px';b.textContent='เปิดห้อง · '+(room.pair||[]).join(' ↔ ')+' · แอดมิน '+room.admin;b.onclick=()=>{document.getElementById('chatListPanel').classList.remove('show');openMediationRoom(room.id);};wrap.append(b);});
+    body.prepend(wrap);
+  }catch(e){console.error(e);}
+}
+async function endMediatedSale(){
+  if(!currentMediationId||!currentMediationAdmin){alert('เฉพาะแอดมินคนกลางที่ได้รับมอบหมายเท่านั้น');return;}
+  if(!confirm('ยืนยันจบการขายใช่หรือไม่? หลังยืนยัน ห้องคนกลางจะถูกปิดสำหรับผู้เข้าร่วมทุกคน'))return;
+  try{
+    const d=await api('/api/mediation/'+encodeURIComponent(currentMediationId)+'/end',{method:'POST'});
+    if(!d.success)throw new Error(d.message||'จบการขายไม่สำเร็จ');
+    currentMediationId=null;currentMediationAdmin=false;currentPartner=null;document.getElementById('chatMessages').replaceChildren();
+    const msg=document.createElement('div');msg.className='empty-state';msg.textContent='จบการขายแล้ว ห้องคนกลางถูกปิด';document.getElementById('chatMessages').append(msg);
+    document.getElementById('chatInput').disabled=true;document.getElementById('chatInput').placeholder='ห้องนี้ปิดแล้ว';setMediationControls('closed');await loadMyMediationRooms();await loadNotifications();
+  }catch(err){alert(err.message||'จบการขายไม่สำเร็จ');}
+}
+function leaveMediationRoom(){currentMediationId=null;currentMediationAdmin=false;document.getElementById('chatInput').disabled=false;document.getElementById('chatInput').placeholder='พิมพ์ข้อความ...';setMediationControls('private');if(currentPartner)loadConversation();else{document.getElementById('chatPartnerName').textContent='แชท';document.getElementById('chatPartnerSubtitle').textContent='เลือกห้องคนกลางอีกครั้งเพื่อกลับเข้าสนทนา';document.getElementById('chatMessages').innerHTML='<div class="empty-state">ปิดหน้าต่างแชทหรือเปิดห้องคนกลางจากรายการแชท</div>';}}
+
+async function openChatWith(name,avatar=null){
+  currentMediationId=null;currentMediationAdmin=false;
+  document.getElementById('chatInput').disabled=false;document.getElementById('chatInput').placeholder='พิมพ์ข้อความ...';setMediationControls('private');
+  if(name===currentUsername){alert('ไม่สามารถแชตกับตัวเองได้');return;}
+  currentPartner=name;document.getElementById('chatPartnerName').textContent=name;
+  const avatarNode=document.getElementById('chatPartnerAvatar');avatarNode.replaceChildren();
+  if(avatar){const img=document.createElement('img');img.src=avatar;img.alt='';img.onerror=()=>{avatarNode.textContent=(name||'?').slice(0,1).toUpperCase();};avatarNode.append(img);}else avatarNode.textContent=(name||'?').slice(0,1).toUpperCase();
+  document.getElementById('chatPartnerSubtitle').textContent='FM_Market Messenger · บันทึกประวัติอัตโนมัติ';
+  document.getElementById('chatOverlay').classList.add('show');await loadConversation();document.getElementById('chatInput').focus();
+}
+function closeChat(){document.getElementById('chatOverlay').classList.remove('show');currentPartner=null;currentMediationId=null;currentMediationAdmin=false;loadChatOverview();loadMyMediationRooms();}
 const emojiChoices=['😀','😃','😄','😁','😆','😅','😂','🤣','🥹','😊','😍','🥰','😘','😎','🤔','😭','😢','😡','👍','👎','👏','🙏','🔥','❤️','💛','💖','🎉','✨','💯','🤝','🙌','😴','🤗','😇','😋','🤩','💔','💸','🚗','🎮','🐱','🐶','🌈','☀️','🌙','🍀','💎','👑'];
 function initEmojiPicker(){const picker=document.getElementById('emojiPicker');if(!picker||picker.dataset.ready)return;emojiChoices.forEach(emoji=>{const b=document.createElement('button');b.type='button';b.className='emoji-choice';b.textContent=emoji;b.title=emoji;b.onclick=()=>{const input=document.getElementById('chatInput');input.value+=emoji;input.focus();};picker.append(b);});picker.dataset.ready='1';}
 function toggleEmojiPicker(){initEmojiPicker();document.getElementById('emojiPicker').classList.toggle('show');document.getElementById('gifPanel').classList.remove('show');}
 function toggleGifPanel(){document.getElementById('gifPanel').classList.toggle('show');document.getElementById('emojiPicker').classList.remove('show');}
 function searchGif(){const q=encodeURIComponent(document.getElementById('chatInput').value.trim()||'reaction');window.open('https://tenor.com/search/'+q+'-gifs','_blank','noopener,noreferrer');}
 async function loadConversation(){
+  if(currentMediationId){await loadMediationConversation();return;}
   if(!currentPartner)return;
-  try{const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));const box=document.getElementById('chatMessages');box.replaceChildren();d.messages.forEach(m=>{const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');if(m.type==='gif'){const img=document.createElement('img');img.className='msg-gif';img.src=m.text;img.alt='GIF';img.loading='lazy';img.referrerPolicy='no-referrer';img.onerror=()=>{img.replaceWith(document.createTextNode('เปิด GIF ไม่ได้ — ลิงก์อาจหมดอายุ'));};wrap.append(img);}else{const content=document.createElement('div');content.textContent=m.text;wrap.append(content);}const time=document.createElement('div');time.className='msg-time';time.textContent=m.time;wrap.append(time);box.append(wrap);});box.scrollTop=box.scrollHeight;loadChatOverview();}
-  catch(err){console.error(err);const box=document.getElementById('chatMessages');box.replaceChildren();const error=document.createElement('div');error.className='empty-state';error.textContent=err.message||'เปิดประวัติแชทไม่สำเร็จ';box.append(error);}
+  try{
+    const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));
+    const box=document.getElementById('chatMessages');const wasNearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<110;const oldTop=box.scrollTop;
+    box.replaceChildren();const messages=d.messages||[];
+    if(!messages.length){const empty=document.createElement('div');empty.className='empty-state';empty.textContent='คุณและ '+currentPartner+' ยังไม่มีข้อความ เริ่มทักทายกันได้เลย 👋';box.append(empty);}
+    const lastMineIndex=messages.reduce((idx,m,i)=>m.from===currentUsername?i:idx,-1);
+    messages.forEach((m,i)=>{
+      const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');
+      if(m.type==='gif'){const img=document.createElement('img');img.className='msg-gif';img.src=m.text;img.alt='GIF';img.loading='lazy';img.referrerPolicy='no-referrer';img.onerror=()=>{img.replaceWith(document.createTextNode('เปิด GIF ไม่ได้ — ลิงก์อาจหมดอายุ'));};wrap.append(img);}
+      else{const content=document.createElement('div');content.textContent=m.text;wrap.append(content);}
+      const time=document.createElement('div');time.className='msg-time';time.textContent=formatNotificationTime(m.time);time.title=parseNotificationTime(m.time)?'เวลาประเทศไทย: '+new Intl.DateTimeFormat('th-TH',{timeZone:'Asia/Bangkok',dateStyle:'medium',timeStyle:'short'}).format(parseNotificationTime(m.time)):m.time||'';wrap.append(time);
+      if(i===lastMineIndex&&m.read){const receipt=document.createElement('div');receipt.className='msg-receipt';receipt.textContent='อ่านแล้ว ✓';wrap.append(receipt);}
+      box.append(wrap);
+    });
+    if(wasNearBottom||!messages.length)box.scrollTop=box.scrollHeight;else box.scrollTop=oldTop;
+    loadChatOverview();
+  }catch(err){console.error(err);const box=document.getElementById('chatMessages');box.replaceChildren();const error=document.createElement('div');error.className='empty-state';error.textContent=err.message||'เปิดประวัติแชทไม่สำเร็จ';box.append(error);}
 }
 function onChatEnter(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}}
-async function postChatPayload(payload){if(!currentPartner){alert('กรุณาเลือกผู้ติดต่อก่อน');return false;}try{const d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,...payload})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');await loadConversation();loadNotifications();return true;}catch(err){alert(err.message);return false;}}
+async function postChatPayload(payload){try{let d;if(currentMediationId){if(payload.type==='gif')throw new Error('ห้องคนกลางรองรับข้อความตัวอักษรในเวอร์ชันนี้');d=await api('/api/mediation/'+encodeURIComponent(currentMediationId)+'/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:payload.text})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');await loadMediationConversation();return true;}if(!currentPartner){alert('กรุณาเลือกผู้ติดต่อก่อน');return false;}d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,...payload})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');await loadConversation();loadNotifications();return true;}catch(err){alert(err.message);return false;}}
 async function sendChatMessage(){const input=document.getElementById('chatInput');const message=input.value.trim();if(!message)return;if(await postChatPayload({text:message,type:'text'})){input.value='';document.getElementById('emojiPicker').classList.remove('show');}}
 async function sendGifMessage(){const input=document.getElementById('gifUrlInput');const url=input.value.trim();if(!url){alert('วางลิงก์ GIF ก่อนส่ง');return;}if(await postChatPayload({text:url,type:'gif'})){input.value='';document.getElementById('gifPanel').classList.remove('show');}}
 document.addEventListener('click',e=>{
   if(!e.target.closest('.notif-wrap'))document.getElementById('notifPanel').classList.remove('show');
   if(!e.target.closest('.chat-wrap'))document.getElementById('chatListPanel').classList.remove('show');
 });
-loadNotifications();loadChatOverview();
-setInterval(()=>{loadNotifications();loadChatOverview();if(currentPartner)loadConversation();},10000);
+async function sendPresenceHeartbeat(){if(presenceBusy)return;presenceBusy=true;try{await api('/api/presence',{method:'POST'});}catch(e){}finally{presenceBusy=false;}}
+loadNotifications();loadChatOverview();loadMyMediationRooms();sendPresenceHeartbeat();
+setInterval(()=>{loadNotifications();loadChatOverview();loadMyMediationRooms();sendPresenceHeartbeat();if(currentPartner||currentMediationId)loadConversation();},20000);
 </script>
 </body>
 </html>
