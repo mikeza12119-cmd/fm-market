@@ -191,7 +191,6 @@ def delete_post(post_id):
     save_database(db)
     return jsonify({"success": True})
 
-# === แชท & แจ้งเตือน ===
 @app.route('/api/chat-overview', methods=['GET'])
 def chat_overview():
     if 'user' not in session:
@@ -432,7 +431,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .badge{font-size:.7rem;padding:3px 8px;border-radius:12px;font-weight:700}
 .badge-admin{background:var(--red);color:#fff}
 .badge-member{background:var(--blue);color:#fff}
-/* === แจ้งเตือน & แชท === */
 .notif-wrap, .chat-wrap{position:relative}
 .bell-btn, .chat-btn-nav{background:transparent;border:none;color:var(--text);font-size:1.2rem;padding:6px 10px;cursor:pointer;position:relative}
 .badge-count{position:absolute;top:-2px;right:-4px;background:var(--red);color:#fff;font-size:.65rem;min-width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;transform:scale(0);transition:.2s}
@@ -450,7 +448,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .panel-item-text{font-size:.85rem;color:var(--soft);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .panel-item-time{font-size:.7rem;color:#555;margin-top:4px}
 .empty-state{padding:30px;text-align:center;color:var(--soft);font-size:.9rem}
-/* หน้าแชท */
 .chat-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:3000;display:none;align-items:flex-end;justify-content:flex-end;padding:20px}
 .chat-overlay.show{display:flex}
 .chat-window{width:100%;max-width:400px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);display:flex;flex-direction:column;max-height:520px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
@@ -506,8 +503,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     <nav class="nav">
       <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
       <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
-      
-      <!-- แจ้งเตือนข้อความ -->
       <div class="notif-wrap">
         <button class="bell-btn" onclick="toggleNotif()">
           🔔
@@ -526,8 +521,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           </div>
         </div>
       </div>
-
-      <!-- รายการแชท -->
       <div class="chat-wrap">
         <button class="bell-btn" onclick="toggleChatList()">
           💬
@@ -545,7 +538,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           </div>
         </div>
       </div>
-
       <span>{{ session_user.username }}</span>
       {% if session_user.role == 'admin' %}
       <span class="badge badge-admin">ผู้ดูแล</span>
@@ -557,7 +549,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
   </div>
 </header>
 
-<!-- หน้าต่างแชท -->
 <div id="chatOverlay" class="chat-overlay" onclick="if(event.target===this)closeChat()">
   <div class="chat-window" onclick="event.stopPropagation()">
     <div class="chat-header">
@@ -671,7 +662,6 @@ let selectedImgs = [];
 let currentChatPartner = null;
 let pollTimer = null;
 
-// โหลดจำนวนแจ้งเตือน + รายการแชท
 async function refreshBadges(){
   try{
     const [chatRes, notifRes] = await Promise.all([
@@ -700,7 +690,6 @@ async function refreshBadges(){
   }catch(e){console.error(e)}
 }
 
-// แผงแจ้งเตือน
 async function toggleNotif(){
   const panel = document.getElementById('notifPanel');
   panel.classList.toggle('show');
@@ -737,7 +726,6 @@ async function clearAllNotif(){
   await refreshBadges();
 }
 
-// แผงรายการแชท
 async function toggleChatList(){
   const panel = document.getElementById('chatListPanel');
   panel.classList.toggle('show');
@@ -768,7 +756,6 @@ async function markAllChatRead(){
   await refreshBadges();
 }
 
-// หน้าต่างแชท
 async function openChatWith(name){
   currentChatPartner = name;
   document.getElementById('chatPartnerName').textContent = `คุยกับ ${name}`;
@@ -820,7 +807,6 @@ function onChatEnter(e){
   if(e.key === 'Enter') sendChatMessage();
 }
 
-// โพสต์ & ทั่วไป
 document.getElementById('imageInput').addEventListener('change', async e=>{
   for(const file of e.target.files){
     const fd = new FormData();
@@ -882,6 +868,15 @@ async function doLogout(){
   location.href='/';
 }
 
-// รีเฟรชจำนวนแจ้งเตือนทุก 30 วินาที
 refreshBadges();
-pollTimer = setInterval(refresh
+pollTimer = setInterval(refreshBadges, 30000);
+</script>
+</body>
+</html>
+'''
+
+if __name__ == '__main__':
+    print("="*60)
+    print("🖤 FM_Market — ระบบแจ้งเตือนครบถ้วน")
+    print("✅ แจ้งเตือนคนทักมา + จำนวนข้อความไม่อ่าน")
+    print("✅ แชทส่วนตัวทำงาน
