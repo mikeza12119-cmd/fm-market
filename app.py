@@ -3,15 +3,17 @@ import uuid
 import json
 import os
 from datetime import datetime, timedelta
-from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.secret_key = "fm_market_secure_key_2026_final"
+# Set SECRET_KEY in the deployment environment. The fallback is for local development only.
+app.secret_key = os.environ.get("SECRET_KEY", "local-development-only-change-me")
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
-DB_FILE = "database.json"
-UPLOAD_FOLDER = "uploads"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.environ.get("DB_FILE", os.path.join(BASE_DIR, "database.json"))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 AVATAR_FOLDER = os.path.join(UPLOAD_FOLDER, "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 POST_LIFETIME_HOURS = 3
@@ -24,6 +26,11 @@ def serve_upload(filename):
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def json_body():
+    """Return a JSON object or an empty dict for malformed/missing request bodies."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
 
 def get_role_config(role):
     roles = {
@@ -52,7 +59,7 @@ def load_database():
     default_data = {
         "users": {
             "admin": {
-                "password": generate_password_hash("admin123", method='pbkdf2:sha256'),
+                "password": generate_password_hash(os.environ.get("ADMIN_PASSWORD", "admin123"), method='pbkdf2:sha256'),
                 "role": "admin",
                 "avatar": None,
                 "bio": "ผู้ดูแลระบบ FM_Market",
@@ -76,9 +83,9 @@ def load_database():
         },
         "settings": {"post_lifetime_hours": POST_LIFETIME_HOURS, "max_images_per_post": 5}
     }
+    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     if not os.path.exists(DB_FILE):
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_data, f, ensure_ascii=False, indent=2)
+        save_database(default_data)
         return default_data
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -110,8 +117,14 @@ def load_database():
     return data
 
 def save_database(data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
+    # Atomic replacement prevents a partial JSON file if the process is interrupted.
+    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
+    temp_file = DB_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_file, DB_FILE)
 
 @app.route('/')
 def index():
@@ -146,8 +159,9 @@ def upload_avatar():
     db = load_database()
     uname = session['user']['username']
     if db["users"][uname].get("avatar"):
-        old_path = db["users"][uname]["avatar"].lstrip("/")
-        if os.path.exists(old_path):
+        old_name = os.path.basename(db["users"][uname]["avatar"])
+        old_path = os.path.join(AVATAR_FOLDER, old_name)
+        if os.path.isfile(old_path):
             os.remove(old_path)
     db["users"][uname]["avatar"] = avatar_url
     save_database(db)
@@ -176,26 +190,43 @@ def update_profile():
         return jsonify({"success": False})
     db = load_database()
     uname = session['user']['username']
-    d = request.json
+    d = json_body()
     if "bio" in d:
-        db["users"][uname]["bio"] = d["bio"].strip()
+        bio = d.get("bio")
+        if not isinstance(bio, str):
+            return jsonify({"success": False, "message": "ข้อมูลโปรไฟล์ไม่ถูกต้อง"}), 400
+        db["users"][uname]["bio"] = bio.strip()[:500]
     save_database(db)
     return jsonify({"success": True, "message": "บันทึกข้อมูลเรียบร้อย"})
 
 @app.route('/api/admin/set-role', methods=['POST'])
 def set_role():
-    if 'user' not in session or session['user']['role'] != 'admin':
-        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
-    d = request.json
-    target_user = d.get("username", "").strip()
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
+    db = load_database()
+    actor = db["users"].get(session["user"].get("username"), {})
+    # Never trust the role stored in a client-side session cookie; roles may have changed.
+    if actor.get("role") != "admin":
+        session.pop("user", None)
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"}), 403
+    d = json_body()
+    target_user = d.get("username", "")
+    if not isinstance(target_user, str):
+        return jsonify({"success": False, "message": "ชื่อผู้ใช้ไม่ถูกต้อง"}), 400
+    target_user = target_user.strip()
     new_role = d.get("role")
     if new_role not in ["admin", "vip", "member"]:
-        return jsonify({"success": False, "message": "ยศไม่ถูกต้อง"})
-    db = load_database()
+        return jsonify({"success": False, "message": "ยศไม่ถูกต้อง"}), 400
     if target_user not in db["users"]:
-        return jsonify({"success": False, "message": "ไม่พบผู้ใช้"})
+        return jsonify({"success": False, "message": "ไม่พบผู้ใช้"}), 404
+    if db["users"][target_user].get("role") == "admin" and new_role != "admin":
+        admin_count = sum(1 for user in db["users"].values() if user.get("role") == "admin")
+        if admin_count <= 1:
+            return jsonify({"success": False, "message": "ต้องมีผู้ดูแลระบบอย่างน้อยหนึ่งบัญชี"}), 400
     db["users"][target_user]["role"] = new_role
     save_database(db)
+    if target_user == session["user"].get("username"):
+        session["user"]["role"] = new_role
     return jsonify({"success": True, "message": f"ตั้งยศ {new_role} ให้ {target_user} สำเร็จ"})
 
 @app.route('/api/upload-image', methods=['POST'])
@@ -217,14 +248,14 @@ def upload_image():
 @app.route('/api/register', methods=['POST'])
 def register():
     db = load_database()
-    d = request.json
-    u = d['username'].strip()
-    p = d['password']
-    if len(u) < 2:
+    d = json_body()
+    u = str(d.get("username", "")).strip()
+    p = d.get("password", "")
+    if len(u) < 2 or len(u) > 32 or any(ord(c) < 32 for c in u):
         return jsonify({"success": False, "message": "ชื่อต้อง 2 ตัวอักษรขึ้นไป"})
     if u in db['users']:
         return jsonify({"success": False, "message": "ชื่อนี้มีคนใช้แล้ว"})
-    if len(p) < 4:
+    if not isinstance(p, str) or len(p) < 4 or len(p) > 256:
         return jsonify({"success": False, "message": "รหัสผ่านต้อง 4 ตัวขึ้นไป"})
     hashed_pw = generate_password_hash(p, method='pbkdf2:sha256')
     db['users'][u] = {
@@ -235,20 +266,22 @@ def register():
         "created_at": datetime.now().strftime('%d/%m/%Y %H:%M')
     }
     save_database(db)
+    session.clear()
     session['user'] = {"username": u, "role": "member"}
     return jsonify({"success": True, "user": {"username": u, "role": "member"}})
 
 @app.route('/api/login', methods=['POST'])
 def login():
     db = load_database()
-    d = request.json
-    u = d['username'].strip()
-    p = d['password']
+    d = json_body()
+    u = str(d.get("username", "")).strip()
+    p = d.get("password", "")
     user = db['users'].get(u)
     if not user:
         return jsonify({"success": False, "message": "ชื่อหรือรหัสผ่านไม่ถูกต้อง"})
-    if not check_password_hash(user['password'], p):
+    if not isinstance(p, str) or not check_password_hash(user['password'], p):
         return jsonify({"success": False, "message": "ชื่อหรือรหัสผ่านไม่ถูกต้อง"})
+    session.clear()
     session['user'] = {"username": u, "role": user["role"]}
     return jsonify({"success": True, "user": session['user']})
 
@@ -262,17 +295,24 @@ def create_post():
     if 'user' not in session:
         return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"})
     db = load_database()
-    d = request.json
-    if d.get('category') not in db["categories"]:
+    d = json_body()
+    category = d.get("category")
+    title = d.get("title", "")
+    detail = d.get("detail", "")
+    images = d.get("images", [])
+    if category not in db["categories"]:
         return jsonify({"success": False, "message": "หมวดหมู่ไม่ถูกต้อง"})
-    if not d.get("title", "").strip():
+    if not isinstance(title, str) or not title.strip():
         return jsonify({"success": False, "message": "กรุณากรอกหัวข้อ"})
+    if not isinstance(detail, str) or not isinstance(images, list):
+        return jsonify({"success": False, "message": "ข้อมูลประกาศไม่ถูกต้อง"})
+    images = [url for url in images[:5] if isinstance(url, str) and url.startswith("/uploads/")]
     post = {
         "id": str(uuid.uuid4())[:8],
-        "category": d["category"],
-        "title": d["title"].strip(),
-        "detail": d.get("detail", "").strip(),
-        "images": d.get("images", [])[:5],
+        "category": category,
+        "title": title.strip()[:120],
+        "detail": detail.strip()[:5000],
+        "images": images,
         "author": session['user']['username'],
         "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
         "status": "active"
@@ -287,10 +327,15 @@ def delete_post(post_id):
         return jsonify({"success": False})
     db = load_database()
     uname = session['user']['username']
+    current_user = db["users"].get(uname, {})
+    is_admin = current_user.get("role") == "admin"
+    if not current_user:
+        session.pop("user", None)
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบใหม่"}), 401
     keep = []
     found = False
     for p in db["posts"]:
-        if p["id"] == post_id and (p["author"] == uname or session['user']['role'] == 'admin'):
+        if p["id"] == post_id and (p["author"] == uname or is_admin):
             found = True
         else:
             keep.append(p)
@@ -348,13 +393,16 @@ def get_conversation(partner):
 def send_message():
     if 'user' not in session:
         return jsonify({"success": False})
-    d = request.json
+    d = json_body()
     db = load_database()
     me = session['user']['username']
     receiver = d.get("to")
-    text = d.get("text", "").strip()
+    text = d.get("text", "")
     msg_type = d.get("type", "text")
-    if not receiver or not text or receiver == me or receiver not in db["users"]:
+    if not isinstance(receiver, str) or not isinstance(text, str):
+        return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"})
+    text = text.strip()
+    if not receiver or not text or len(text) > 2000 or receiver == me or receiver not in db["users"]:
         return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"})
     if msg_type not in ("text", "gif"):
         return jsonify({"success": False, "message": "รูปแบบข้อความไม่ถูกต้อง"})
