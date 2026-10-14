@@ -137,14 +137,42 @@ def index():
     db = load_database()
     if 'user' not in session:
         return render_template_string(AUTH_PAGE)
+
+    # A session can outlive a user record (for example after a database migration).
+    # Clear only that stale browser session; never delete or reset database records.
+    session_user = session.get('user') or {}
+    uname = session_user.get('username') if isinstance(session_user, dict) else None
+    users = db.get("users", {})
+    if not isinstance(uname, str) or uname not in users:
+        session.clear()
+        return render_template_string(AUTH_PAGE)
+
+    # Use the current role from the database rather than trusting an old cookie.
+    session_user = {"username": uname, "role": users[uname].get("role", "member")}
+    session['user'] = session_user
+
+    # Older posts may reference a user who is no longer in the users dictionary.
+    # Supply a display-only fallback so one stale post cannot crash the whole page.
+    all_users = dict(users)
+    for post in db.get("posts", []):
+        if not isinstance(post, dict):
+            continue
+        author = post.get("author")
+        if isinstance(author, str) and author not in all_users:
+            all_users[author] = {
+                "role": "member", "avatar": None, "bio": "",
+                "profile_theme": "#d4af37", "profile_banner": None,
+                "created_at": "-"
+            }
+
     return render_template_string(
         MAIN_PAGE,
-        posts=db["posts"],
-        news=db["news"],
-        categories=db["categories"],
-        session_user=session.get('user'),
+        posts=db.get("posts", []),
+        news=db.get("news", []),
+        categories=db.get("categories", {}),
+        session_user=session_user,
         get_role_config=get_role_config,
-        all_users=db["users"]
+        all_users=all_users
     )
 
 @app.route('/api/upload-avatar', methods=['POST'])
@@ -176,15 +204,23 @@ def upload_avatar():
 @app.route('/api/profile', methods=['GET'])
 def get_profile():
     if 'user' not in session:
-        return jsonify({"success": False})
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     db = load_database()
-    uname = session['user']['username']
-    u = db["users"].get(uname)
+    session_user = session.get('user') or {}
+    uname = session_user.get('username') if isinstance(session_user, dict) else None
+    u = db.get("users", {}).get(uname) if isinstance(uname, str) else None
+    if not isinstance(u, dict):
+        session.clear()
+        return jsonify({
+            "success": False,
+            "message": "ไม่พบบัญชีในฐานข้อมูล กรุณาเข้าสู่ระบบใหม่"
+        }), 401
+    role = u.get("role", "member")
     return jsonify({
         "success": True,
         "username": uname,
-        "role": u["role"],
-        "role_info": get_role_config(u["role"]),
+        "role": role,
+        "role_info": get_role_config(role),
         "avatar": u.get("avatar"),
         "bio": u.get("bio", ""),
         "profile_theme": u.get("profile_theme", "#d4af37"),
@@ -329,8 +365,16 @@ def logout():
 @app.route('/api/post', methods=['POST'])
 def create_post():
     if 'user' not in session:
-        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"})
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     db = load_database()
+    session_user = session.get('user') or {}
+    uname = session_user.get('username') if isinstance(session_user, dict) else None
+    if not isinstance(uname, str) or uname not in db.get("users", {}):
+        session.clear()
+        return jsonify({
+            "success": False,
+            "message": "ไม่พบบัญชีในฐานข้อมูล กรุณาเข้าสู่ระบบใหม่"
+        }), 401
     d = json_body()
     category = d.get("category")
     title = d.get("title", "")
@@ -349,7 +393,7 @@ def create_post():
         "title": title.strip()[:120],
         "detail": detail.strip()[:5000],
         "images": images,
-        "author": session['user']['username'],
+        "author": uname,
         "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
         "status": "active"
     }
@@ -885,8 +929,8 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     <div id="postList">
       {% if posts %}
       {% for p in posts %}
-      {% set author_data = all_users[p.author] %}
-      {% set role_info = get_role_config(author_data.role) %}
+      {% set author_data = all_users.get(p.author, {'role': 'member', 'avatar': none}) %}
+      {% set role_info = get_role_config(author_data.get('role', 'member')) %}
       <div class="postcard" data-cat="{{p.category}}">
         <div class="post-header">
           <div class="avatar-wrap {{author_data.role}}">
