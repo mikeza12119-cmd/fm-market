@@ -1,10 +1,14 @@
 services:
   - type: web
-    name: app
+    name: fm-market
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: app:app
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        generateValue: true
