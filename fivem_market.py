@@ -126,7 +126,8 @@ def index():
         news=db["news"],
         categories=db["categories"],
         session_user=session.get('user'),
-        get_role_config=get_role_config
+        get_role_config=get_role_config,
+        all_users=db["users"]
     )
 
 @app.route('/api/upload-avatar', methods=['POST'])
@@ -736,7 +737,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     <div id="postList">
       {% if posts %}
       {% for p in posts %}
-      {% set author_data = load_database().users[p.author] %}
+      {% set author_data = all_users[p.author] %}
       {% set role_info = get_role_config(author_data.role) %}
       <div class="postcard" data-cat="{{p.category}}">
         <div class="post-header">
@@ -780,4 +781,12 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     </div>
   </div>
 
-  <div id="tabPost" class="
+  <div id="tabPost" class="content-tab">
+    <div class="form-card">
+      <h3>✍️ ลงประกาศสินค้า</h3>
+      <form id="postForm">
+        <div class="form-group">
+          <label>หมวดหมู่</label>
+          <select id="category" class="form-input">
+            {% for k,v in categories.items() %}
+            <option value="{{k}}">{{v
