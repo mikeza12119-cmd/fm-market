@@ -7,7 +7,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "fm_market_secure_key_2026_fixed_v2"
+app.secret_key = "fm_market_secure_key_2026_fixed_v3"
 
 DB_FILE = "database.json"
 UPLOAD_FOLDER = "uploads"
@@ -29,21 +29,18 @@ def get_role_config(role):
         "admin": {
             "name": "ผู้ดูแลระบบ",
             "badge": "👑",
-            "border": "linear-gradient(135deg, #ffd700, #ffed4e, #ffd700)",
             "bg_badge": "linear-gradient(90deg, #b8860b, #ffd700)",
             "text_color": "#ffd700"
         },
         "vip": {
             "name": "สมาชิก VIP",
             "badge": "⭐",
-            "border": "linear-gradient(135deg, #9932cc, #da70d6, #9932cc)",
             "bg_badge": "linear-gradient(90deg, #8b00ff, #da70d6)",
             "text_color": "#da70d6"
         },
         "member": {
             "name": "สมาชิกทั่วไป",
             "badge": "👤",
-            "border": "linear-gradient(135deg, #4b5563, #6b7280, #4b5563)",
             "bg_badge": "linear-gradient(90deg, #374151, #6b7280)",
             "text_color": "#9ca3af"
         }
@@ -409,11 +406,10 @@ AUTH_PAGE = '''
 <title>เข้าสู่ระบบ — FM_Market</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:"Segoe UI",sans-serif}
-:root{--bg:#050508;--card:#12121a;--gold:#d4af37;--gold2:#f0c808;
---text:#fff;--text2:#a0a0b5;--border:#282838;--error:#e53935}
+:root{--bg:#050508;--card:#12121a;--gold:#d4af37;--gold2:#f0c808;--text:#fff;--text2:#a0a0b5;--border:#282838;--error:#e53935}
 body{background:linear-gradient(180deg,#000,#050508);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .wrap{max-width:420px;width:100%}
-.logo{text-align:center;margin-bottom:40px;cursor:pointer}
+.logo{text-align:center;margin-bottom:40px}
 .logo h1{font-size:2.4rem}
 .logo span{color:var(--gold)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
@@ -434,7 +430,7 @@ button[type=submit]:hover{transform:translateY(-2px)}
 </head>
 <body>
 <div class="wrap">
-  <div class="logo" onclick="location.href='/'"><h1>FM<span>_Market</span></h1></div>
+  <div class="logo"><h1>FM<span>_Market</span></h1></div>
   <div class="card">
     <div class="tabs">
       <div class="tab active" onclick="sw('login')">เข้าสู่ระบบ</div>
@@ -475,20 +471,11 @@ async function doL(e){
   const r=await fetch('/api/login',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      username:document.getElementById('lu').value,
-      password:document.getElementById('lp').value
-    })
+    body:JSON.stringify({username:document.getElementById('lu').value,password:document.getElementById('lp').value})
   });
   const d=await r.json();
-  if(d.success){
-    alert('✅ เข้าสู่ระบบสำเร็จ');
-    window.location.href='/';
-  } else {
-    const errBox = document.getElementById('loginErr');
-    errBox.textContent = '❌ ' + d.message;
-    errBox.style.display='block';
-  }
+  if(d.success){alert('✅ เข้าสู่ระบบสำเร็จ');window.location.href='/';}
+  else{const b=document.getElementById('loginErr');b.textContent='❌ '+d.message;b.style.display='block';}
 }
 async function doR(e){
   e.preventDefault();
@@ -496,20 +483,11 @@ async function doR(e){
   const r=await fetch('/api/register',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      username:document.getElementById('ru').value,
-      password:document.getElementById('rp').value
-    })
+    body:JSON.stringify({username:document.getElementById('ru').value,password:document.getElementById('rp').value})
   });
   const d=await r.json();
-  if(d.success){
-    alert('✅ สมัครสำเร็จ! กำลังเข้าสู่ระบบ...');
-    window.location.href='/';
-  } else {
-    const errBox = document.getElementById('regErr');
-    errBox.textContent = '❌ ' + d.message;
-    errBox.style.display='block';
-  }
+  if(d.success){alert('✅ สมัครสำเร็จ! กำลังเข้าสู่ระบบ...');window.location.href='/';}
+  else{const b=document.getElementById('regErr');b.textContent='❌ '+d.message;b.style.display='block';}
 }
 </script>
 </body>
@@ -524,13 +502,12 @@ MAIN_PAGE = '''
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FM_Market — ตลาดซื้อขาย</title>
 <style>
-:root{--bg:#050508;--card:#12121a;--gold:#d4af37;--gold2:#f0c808;--blue:#2563eb;--red:#c41e3a;--green:#10b981;--text:#fff;--soft:#9090a5;--border:#282838;--r:14px}
+:root{--bg:#050508;--card:#12121a;--gold:#d4af37;--gold2:#f0c808;--blue:#2563eb;--red:#c41e3a;--text:#fff;--soft:#9090a5;--border:#282838;--r:14px}
 *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,sans-serif}
 body{background:var(--bg);color:var(--text);line-height:1.6;padding-bottom:80px}
 header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 20px}
 .head{max-width:1200px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
-.brand{font-size:1.4rem;font-weight:900;cursor:pointer;transition:.2s}
-.brand:hover{transform:scale(1.05)}
+.brand{font-size:1.4rem;font-weight:900;cursor:pointer}
 .brand span{color:var(--gold)}
 .nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .btn{padding:9px 16px;border:none;border-radius:var(--r);font-weight:700;transition:.2s;cursor:pointer}
@@ -539,19 +516,19 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .btn-blue{background:var(--blue);color:#fff}
 .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
 .btn-sm{padding:6px 12px;font-size:.85rem}
-.btn-red{background:var(--red);color:#fff;border-color:var(--red)}
+.btn-red{background:var(--red);color:#fff}
 .badge{font-size:.7rem;padding:3px 8px;border-radius:12px;font-weight:700}
 .badge-admin{background:var(--red);color:#fff}
 .badge-member{background:var(--blue);color:#fff}
-.notif-wrap, .chat-wrap, .profile-wrap{position:relative}
-.bell-btn, .chat-btn-nav, .profile-btn{background:transparent;border:none;color:var(--text);font-size:1.2rem;padding:6px 10px;cursor:pointer;position:relative}
-.badge-count{position:absolute;top:-2px;right:-4px;background:var(--red);color:#fff;font-size:.65rem;min-width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;transform:scale(0);transition:.2s}
+.notif-wrap,.chat-wrap,.profile-wrap{position:relative}
+.bell-btn,.profile-btn{background:transparent;border:none;color:var(--text);font-size:1.2rem;padding:6px 10px;cursor:pointer;position:relative}
+.badge-count{position:absolute;top:-2px;right:-4px;background:var(--red);color:#fff;font-size:.65rem;min-width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;transform:scale(0);transition:.2s}
 .badge-count.show{transform:scale(1)}
 .dropdown-panel{position:absolute;top:100%;right:0;margin-top:8px;width:340px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);box-shadow:0 10px 40px rgba(0,0,0,.5);display:none;flex-direction:column;max-height:480px;overflow:hidden;z-index:2000}
 .dropdown-panel.show{display:flex}
 .panel-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
 .panel-title{font-weight:700}
-.panel-actions button{background:none;border:none;color:var(--soft);font-size:.8rem;margin-left:8px;cursor:pointer}
+.panel-actions button{background:none;border:none;color:var(--soft);font-size:.8rem;cursor:pointer}
 .panel-list{overflow-y:auto;flex:1}
 .panel-item{padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:.2s}
 .panel-item:hover{background:rgba(37,99,235,.1)}
@@ -611,7 +588,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .preview-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
 .preview-item{position:relative;width:90px;height:90px}
 .preview-item img{width:100%;height:100%;object-fit:cover;border-radius:var(--r)}
-.preview-del{position:absolute;top:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;border:none;width:24px;height:24px;border-radius:50%;font-size:1rem;display:flex;align-items:center;justify-content:center}
+.preview-del{position:absolute;top:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;border:none;width:24px;height:24px;border-radius:50%;font-size:1rem;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .content-tab{display:none}
 .content-tab.active{display:block;animation:fadeIn .3s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
@@ -658,7 +635,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
         <button class="bell-btn" onclick="toggleChatList()">💬<span id="chatBadge" class="badge-count">0</span></button>
         <div id="chatListPanel" class="dropdown-panel">
           <div class="panel-head">
-            <span class="panel-title">💬 ข้อความที่คุยด้วย</span>
+            <span class="panel-title">💬 ข้อความ</span>
             <div class="panel-actions"><button onclick="markAllChatRead()">อ่านทั้งหมด</button></div>
           </div>
           <div id="chatListBody" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
@@ -770,7 +747,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
   <div id="tabPost" class="content-tab">
     <div class="form-card">
       <h3>✍️ ลงประกาศสินค้า</h3>
-      <form id="postForm">
+      <form id="postForm" onsubmit="submitPost(event)">
         <div class="form-group">
           <label>หมวดหมู่</label>
           <select id="category" class="form-input">
@@ -784,4 +761,14 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <input type="text" id="title" class="form-input" placeholder="เช่น ขายเงิน M ราคาถูก" required>
         </div>
         <div class="form-group">
-          <label>
+          <label>รายละเอียด</label>
+          <textarea id="detail" class="form-input" rows="4" placeholder="เช่น ราคา 100 บาท ต่อ 1M..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>รูปภาพ (สูงสุด 5 รูป)</label>
+          <div class="upload-area" onclick="document.getElementById('imgUpload').click()">
+            📷 คลิกเพื่ออัปโหลดรูป
+          </div>
+          <input type="file" id="imgUpload" accept="image/*" multiple class="hidden-input" onchange="handleImgUpload(this.files)">
+          <div id="imgPreviewRow" class="preview-row"></div>
+        </div>
