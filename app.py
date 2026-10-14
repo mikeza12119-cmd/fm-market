@@ -625,7 +625,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
             <span class="panel-title">🔔 การแจ้งเตือน</span>
             <div class="panel-actions">
               <button onclick="markAllNotifRead()">อ่านทั้งหมด</button>
-              <button onclick="clearAllNotif()">ล้าง</button>
             </div>
           </div>
           <div id="notifList" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
@@ -772,3 +771,10 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <input type="file" id="imgUpload" accept="image/*" multiple class="hidden-input" onchange="handleImgUpload(this.files)">
           <div id="imgPreviewRow" class="preview-row"></div>
         </div>
+        <button type="submit" class="btn btn-gold" style="width:100%;margin-top:10px">📤 ลงประกาศ</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="tabProfile" class="content-tab">
+   
