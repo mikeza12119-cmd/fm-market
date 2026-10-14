@@ -7,14 +7,15 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "fm_market_secure_key_2026_fixed_v1"
+app.secret_key = "fm_market_secure_key_2026_fixed_v2"
 
 DB_FILE = "database.json"
 UPLOAD_FOLDER = "uploads"
+AVATAR_FOLDER = os.path.join(UPLOAD_FOLDER, "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 POST_LIFETIME_HOURS = 3
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(AVATAR_FOLDER, exist_ok=True)
 
 @app.route('/uploads/<filename>')
 def serve_upload(filename):
@@ -23,12 +24,40 @@ def serve_upload(filename):
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def get_role_config(role):
+    roles = {
+        "admin": {
+            "name": "ผู้ดูแลระบบ",
+            "badge": "👑",
+            "border": "linear-gradient(135deg, #ffd700, #ffed4e, #ffd700)",
+            "bg_badge": "linear-gradient(90deg, #b8860b, #ffd700)",
+            "text_color": "#ffd700"
+        },
+        "vip": {
+            "name": "สมาชิก VIP",
+            "badge": "⭐",
+            "border": "linear-gradient(135deg, #9932cc, #da70d6, #9932cc)",
+            "bg_badge": "linear-gradient(90deg, #8b00ff, #da70d6)",
+            "text_color": "#da70d6"
+        },
+        "member": {
+            "name": "สมาชิกทั่วไป",
+            "badge": "👤",
+            "border": "linear-gradient(135deg, #4b5563, #6b7280, #4b5563)",
+            "bg_badge": "linear-gradient(90deg, #374151, #6b7280)",
+            "text_color": "#9ca3af"
+        }
+    }
+    return roles.get(role, roles["member"])
+
 def load_database():
     default_data = {
         "users": {
             "admin": {
                 "password": generate_password_hash("admin123", method='pbkdf2:sha256'),
                 "role": "admin",
+                "avatar": None,
+                "bio": "ผู้ดูแลระบบ FM_Market",
                 "created_at": datetime.now().strftime('%d/%m/%Y %H:%M')
             }
         },
@@ -61,6 +90,14 @@ def load_database():
     for k in default_data:
         if k not in data:
             data[k] = default_data[k]
+    for uname in data["users"]:
+        user = data["users"][uname]
+        if "role" not in user:
+            user["role"] = "member"
+        if "avatar" not in user:
+            user["avatar"] = None
+        if "bio" not in user:
+            user["bio"] = ""
     now = datetime.now()
     fresh_posts = []
     for p in data["posts"]:
@@ -88,8 +125,79 @@ def index():
         posts=db["posts"],
         news=db["news"],
         categories=db["categories"],
-        session_user=session.get('user')
+        session_user=session.get('user'),
+        get_role_config=get_role_config
     )
+
+@app.route('/api/upload-avatar', methods=['POST'])
+def upload_avatar():
+    if 'user' not in session:
+        return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"})
+    if 'avatar' not in request.files:
+        return jsonify({"success": False, "message": "ไม่พบไฟล์"})
+    file = request.files['avatar']
+    if file.filename == '':
+        return jsonify({"success": False, "message": "ยังไม่ได้เลือกไฟล์"})
+    if not allowed_file(file.filename):
+        return jsonify({"success": False, "message": "รองรับเฉพาะ .jpg .png .gif .webp"})
+    ext = file.filename.rsplit(".", 1)[1].lower()
+    fn = f"avatar_{uuid.uuid4().hex}.{ext}"
+    file.save(os.path.join(AVATAR_FOLDER, fn))
+    avatar_url = f"/uploads/avatars/{fn}"
+    db = load_database()
+    uname = session['user']['username']
+    if db["users"][uname].get("avatar"):
+        old_path = db["users"][uname]["avatar"].lstrip("/")
+        if os.path.exists(old_path):
+            os.remove(old_path)
+    db["users"][uname]["avatar"] = avatar_url
+    save_database(db)
+    return jsonify({"success": True, "avatar_url": avatar_url})
+
+@app.route('/api/profile', methods=['GET'])
+def get_profile():
+    if 'user' not in session:
+        return jsonify({"success": False})
+    db = load_database()
+    uname = session['user']['username']
+    u = db["users"].get(uname)
+    return jsonify({
+        "success": True,
+        "username": uname,
+        "role": u["role"],
+        "role_info": get_role_config(u["role"]),
+        "avatar": u.get("avatar"),
+        "bio": u.get("bio", ""),
+        "created_at": u.get("created_at", "-")
+    })
+
+@app.route('/api/profile/update', methods=['POST'])
+def update_profile():
+    if 'user' not in session:
+        return jsonify({"success": False})
+    db = load_database()
+    uname = session['user']['username']
+    d = request.json
+    if "bio" in d:
+        db["users"][uname]["bio"] = d["bio"].strip()
+    save_database(db)
+    return jsonify({"success": True, "message": "บันทึกข้อมูลเรียบร้อย"})
+
+@app.route('/api/admin/set-role', methods=['POST'])
+def set_role():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
+    d = request.json
+    target_user = d.get("username", "").strip()
+    new_role = d.get("role")
+    if new_role not in ["admin", "vip", "member"]:
+        return jsonify({"success": False, "message": "ยศไม่ถูกต้อง"})
+    db = load_database()
+    if target_user not in db["users"]:
+        return jsonify({"success": False, "message": "ไม่พบผู้ใช้"})
+    db["users"][target_user]["role"] = new_role
+    save_database(db)
+    return jsonify({"success": True, "message": f"ตั้งยศ {new_role} ให้ {target_user} สำเร็จ"})
 
 @app.route('/api/upload-image', methods=['POST'])
 def upload_image():
@@ -123,6 +231,8 @@ def register():
     db['users'][u] = {
         "password": hashed_pw,
         "role": "member",
+        "avatar": None,
+        "bio": "",
         "created_at": datetime.now().strftime('%d/%m/%Y %H:%M')
     }
     save_database(db)
@@ -302,7 +412,7 @@ AUTH_PAGE = '''
 --text:#fff;--text2:#a0a0b5;--border:#282838;--error:#e53935}
 body{background:linear-gradient(180deg,#000,#050508);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .wrap{max-width:420px;width:100%}
-.logo{text-align:center;margin-bottom:40px}
+.logo{text-align:center;margin-bottom:40px;cursor:pointer}
 .logo h1{font-size:2.4rem}
 .logo span{color:var(--gold)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
@@ -323,7 +433,7 @@ button[type=submit]:hover{transform:translateY(-2px)}
 </head>
 <body>
 <div class="wrap">
-  <div class="logo"><h1>FM<span>_Market</span></h1></div>
+  <div class="logo" onclick="location.href='/'"><h1>FM<span>_Market</span></h1></div>
   <div class="card">
     <div class="tabs">
       <div class="tab active" onclick="sw('login')">เข้าสู่ระบบ</div>
@@ -418,10 +528,11 @@ MAIN_PAGE = '''
 body{background:var(--bg);color:var(--text);line-height:1.6;padding-bottom:80px}
 header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 20px}
 .head{max-width:1200px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
-.brand{font-size:1.4rem;font-weight:900}
+.brand{font-size:1.4rem;font-weight:900;cursor:pointer;transition:.2s}
+.brand:hover{transform:scale(1.05)}
 .brand span{color:var(--gold)}
 .nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.btn{padding:9px 16px;border:none;border-radius:var(--r);font-weight:700;transition:.2s}
+.btn{padding:9px 16px;border:none;border-radius:var(--r);font-weight:700;transition:.2s;cursor:pointer}
 .btn:hover{transform:translateY(-2px)}
 .btn-gold{background:linear-gradient(90deg,var(--gold),var(--gold2));color:#000}
 .btn-blue{background:var(--blue);color:#fff}
@@ -431,8 +542,8 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .badge{font-size:.7rem;padding:3px 8px;border-radius:12px;font-weight:700}
 .badge-admin{background:var(--red);color:#fff}
 .badge-member{background:var(--blue);color:#fff}
-.notif-wrap, .chat-wrap{position:relative}
-.bell-btn, .chat-btn-nav{background:transparent;border:none;color:var(--text);font-size:1.2rem;padding:6px 10px;cursor:pointer;position:relative}
+.notif-wrap, .chat-wrap, .profile-wrap{position:relative}
+.bell-btn, .chat-btn-nav, .profile-btn{background:transparent;border:none;color:var(--text);font-size:1.2rem;padding:6px 10px;cursor:pointer;position:relative}
 .badge-count{position:absolute;top:-2px;right:-4px;background:var(--red);color:#fff;font-size:.65rem;min-width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;transform:scale(0);transition:.2s}
 .badge-count.show{transform:scale(1)}
 .dropdown-panel{position:absolute;top:100%;right:0;margin-top:8px;width:340px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);box-shadow:0 10px 40px rgba(0,0,0,.5);display:none;flex-direction:column;max-height:480px;overflow:hidden;z-index:2000}
@@ -471,7 +582,16 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .cattab.active{border-color:var(--gold);color:var(--gold);background:rgba(212,175,55,.1)}
 .postcard{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-bottom:14px;transition:.25s}
 .postcard:hover{border-color:var(--gold);transform:translateY(-2px)}
-.post-title{font-size:1.1rem;margin-bottom:8px}
+.post-header{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.avatar-wrap{width:42px;height:42px;border-radius:50%;padding:3px}
+.avatar-wrap.admin{background:linear-gradient(135deg,#ffd700,#ffed4e,#ffd700)}
+.avatar-wrap.vip{background:linear-gradient(135deg,#9932cc,#da70d6,#9932cc)}
+.avatar-wrap.member{background:linear-gradient(135deg,#4b5563,#6b7280,#4b5563)}
+.avatar-img{width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid #000}
+.avatar-placeholder{width:100%;height:100%;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1f2937;font-size:1.1rem;border:2px solid #000}
+.post-title{font-size:1.1rem;margin-bottom:4px}
+.post-meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.role-badge{font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:700}
 .post-desc{color:#bbb;white-space:pre-line;margin-bottom:12px}
 .post-imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:12px 0}
 .post-imgs img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:var(--r);cursor:pointer;border:1px solid var(--border);transition:.2s}
@@ -494,12 +614,29 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .content-tab{display:none}
 .content-tab.active{display:block;animation:fadeIn .3s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.profile-card{max-width:500px;margin:0 auto}
+.profile-avatar-row{display:flex;align-items:center;gap:20px;margin-bottom:24px}
+.profile-avatar-frame{width:100px;height:100px;border-radius:50%;padding:4px;cursor:pointer}
+.profile-avatar-frame.admin{background:linear-gradient(135deg,#ffd700,#ffed4e,#ffd700)}
+.profile-avatar-frame.vip{background:linear-gradient(135deg,#9932cc,#da70d6,#9932cc)}
+.profile-avatar-frame.member{background:linear-gradient(135deg,#4b5563,#6b7280,#4b5563)}
+.profile-avatar-img{width:100%;height:100%;border-radius:50%;object-fit:cover;border:3px solid #000}
+.profile-avatar-placeholder{width:100%;height:100%;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1f2937;font-size:2rem;border:3px solid #000}
+.profile-info h2{font-size:1.4rem;margin-bottom:4px}
+.profile-role{display:inline-block;padding:4px 12px;border-radius:12px;font-weight:700;font-size:.85rem;margin-bottom:10px}
+.profile-role.admin{background:linear-gradient(90deg,#b8860b,#ffd700);color:#000}
+.profile-role.vip{background:linear-gradient(90deg,#8b00ff,#da70d6);color:#fff}
+.profile-role.member{background:linear-gradient(90deg,#374151,#6b7280);color:#fff}
+.profile-bio{color:#ccc;white-space:pre-line;margin-bottom:10px}
+.profile-meta{font-size:.8rem;color:var(--soft)}
+.admin-role-section{margin-top:20px;padding-top:20px;border-top:1px dashed var(--border)}
+.hidden-input{display:none}
 </style>
 </head>
 <body>
 <header>
   <div class="head">
-    <div class="brand">FM<span>_Market</span></div>
+    <div class="brand" onclick="showTab('market')"><span>FM</span>_Market</div>
     <nav class="nav">
       <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
       <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
@@ -538,9 +675,13 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           </div>
         </div>
       </div>
-      <span>{{ session_user.username }}</span>
+      <div class="profile-wrap">
+        <button class="profile-btn" onclick="showTab('profile')">👤 {{ session_user.username }}</button>
+      </div>
       {% if session_user.role == 'admin' %}
       <span class="badge badge-admin">ผู้ดูแล</span>
+      {% elif session_user.role == 'vip' %}
+      <span class="badge" style="background:linear-gradient(90deg,#8b00ff,#da70d6);color:#fff">VIP</span>
       {% else %}
       <span class="badge badge-member">สมาชิก</span>
       {% endif %}
@@ -595,9 +736,25 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     <div id="postList">
       {% if posts %}
       {% for p in posts %}
+      {% set author_data = load_database().users[p.author] %}
+      {% set role_info = get_role_config(author_data.role) %}
       <div class="postcard" data-cat="{{p.category}}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <h3 class="post-title">{{ p.title }}</h3>
+        <div class="post-header">
+          <div class="avatar-wrap {{author_data.role}}">
+            {% if author_data.avatar %}
+            <img src="{{author_data.avatar}}" class="avatar-img" alt="">
+            {% else %}
+            <div class="avatar-placeholder">{{p.author[0]|upper}}</div>
+            {% endif %}
+          </div>
+          <div style="flex:1">
+            <div class="post-title">{{ p.title }}</div>
+            <div class="post-meta-row">
+              <span>{{role_info.badge}} {{p.author}}</span>
+              <span class="role-badge" style="background:{{role_info.bg_badge}};color:#fff">{{role_info.name}}</span>
+              <span style="color:var(--soft)">{{ p.time }}</span>
+            </div>
+          </div>
           {% if p.author == session_user.username or session_user.role == 'admin' %}
           <button class="del-btn" onclick="delPost('{{p.id}}')">ลบ</button>
           {% endif %}
@@ -623,261 +780,4 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     </div>
   </div>
 
-  <div id="tabPost" class="content-tab">
-    <div class="form-card">
-      <h3>✍️ ลงประกาศสินค้า</h3>
-      <form id="postForm">
-        <div class="form-group">
-          <label>หมวดหมู่</label>
-          <select id="category" class="form-input">
-            {% for k,v in categories.items() %}
-            <option value="{{k}}">{{v.icon}} {{v.name}}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>หัวข้อ</label>
-          <input type="text" id="title" class="form-input" placeholder="เช่น ขายเงิน M 1,000,000 ราคา..." required>
-        </div>
-        <div class="form-group">
-          <label>รายละเอียด</label>
-          <textarea id="detail" class="form-input" rows="5" placeholder="ระบุจำนวน ราคา เงื่อนไข..."></textarea>
-        </div>
-        <div class="form-group">
-          <label>รูปภาพ (สูงสุด 5 รูป)</label>
-          <div class="upload-area" onclick="document.getElementById('imageInput').click()">
-            📷 คลิกเพื่อเลือกไฟล์
-            <input type="file" id="imageInput" accept="image/*" multiple style="display:none">
-          </div>
-          <div id="previewRow" class="preview-row"></div>
-        </div>
-        <button type="submit" class="btn btn-gold" style="width:100%">📤 ลงประกาศ</button>
-      </form>
-    </div>
-  </div>
-</main>
-
-<script>
-let selectedImgs = [];
-let currentChatPartner = null;
-let pollTimer = null;
-
-async function refreshBadges(){
-  try{
-    const [chatRes, notifRes] = await Promise.all([
-      fetch('/api/chat-overview'),
-      fetch('/api/notifications')
-    ]);
-    const chatData = await chatRes.json();
-    const notifData = await notifRes.json();
-    
-    const chatBadge = document.getElementById('chatBadge');
-    const notifBadge = document.getElementById('notifBadge');
-    
-    if(chatData.total_unread > 0){
-      chatBadge.textContent = chatData.total_unread;
-      chatBadge.classList.add('show');
-    } else {
-      chatBadge.classList.remove('show');
-    }
-    
-    if(notifData.unread_count > 0){
-      notifBadge.textContent = notifData.unread_count;
-      notifBadge.classList.add('show');
-    } else {
-      notifBadge.classList.remove('show');
-    }
-  }catch(e){console.error(e)}
-}
-
-async function toggleNotif(){
-  const panel = document.getElementById('notifPanel');
-  panel.classList.toggle('show');
-  if(panel.classList.contains('show')) await loadNotifList();
-  else document.getElementById('chatListPanel').classList.remove('show');
-}
-
-async function loadNotifList(){
-  const res = await fetch('/api/notifications');
-  const d = await res.json();
-  const list = document.getElementById('notifList');
-  if(!d.notifications.length){
-    list.innerHTML = '<div class="empty-state">ยังไม่มีการแจ้งเตือน</div>';
-    return;
-  }
-  list.innerHTML = d.notifications.map(n=>`
-    <div class="panel-item ${!n.read?'unread':''}">
-      <div class="panel-item-name">${n.from || 'ระบบ'}</div>
-      <div class="panel-item-text">${n.text}</div>
-      <div class="panel-item-time">${n.time}</div>
-    </div>
-  `).join('');
-}
-
-async function markAllNotifRead(){
-  await fetch('/api/notifications/mark-read',{method:'POST'});
-  await loadNotifList();
-  await refreshBadges();
-}
-
-async function clearAllNotif(){
-  if(!confirm('ล้างรายการแจ้งเตือนทั้งหมด?')) return;
-  document.getElementById('notifList').innerHTML = '<div class="empty-state">ล้างแล้ว</div>';
-  await refreshBadges();
-}
-
-async function toggleChatList(){
-  const panel = document.getElementById('chatListPanel');
-  panel.classList.toggle('show');
-  if(panel.classList.contains('show')) await loadChatList();
-  else document.getElementById('notifPanel').classList.remove('show');
-}
-
-async function loadChatList(){
-  const res = await fetch('/api/chat-overview');
-  const d = await res.json();
-  const list = document.getElementById('chatListBody');
-  if(!Object.keys(d.contacts).length){
-    list.innerHTML = '<div class="empty-state">ยังไม่มีข้อความ — ไปทักคนอื่นก่อนเลย!</div>';
-    return;
-  }
-  list.innerHTML = Object.entries(d.contacts).map(([name, info])=>`
-    <div class="panel-item ${info.unread>0?'unread':''}" onclick="openChatWith('${name}')">
-      <div class="panel-item-name">${name} ${info.unread>0?`<span style="color:var(--red);font-size:.7rem">(${info.unread})</span>`:''}</div>
-      <div class="panel-item-text">${info.last_msg}</div>
-      <div class="panel-item-time">${info.time}</div>
-    </div>
-  `).join('');
-}
-
-async function markAllChatRead(){
-  await fetch('/api/notifications/mark-read',{method:'POST'});
-  await loadChatList();
-  await refreshBadges();
-}
-
-async function openChatWith(name){
-  currentChatPartner = name;
-  document.getElementById('chatPartnerName').textContent = `คุยกับ ${name}`;
-  document.getElementById('chatOverlay').classList.add('show');
-  document.getElementById('chatListPanel').classList.remove('show');
-  document.getElementById('notifPanel').classList.remove('show');
-  await loadChatMessages();
-}
-
-function closeChat(){
-  document.getElementById('chatOverlay').classList.remove('show');
-  currentChatPartner = null;
-}
-
-async function loadChatMessages(){
-  if(!currentChatPartner) return;
-  const res = await fetch(`/api/conversation/${currentChatPartner}`);
-  const d = await res.json();
-  const box = document.getElementById('chatMessages');
-  if(!d.messages.length){
-    box.innerHTML = '<div class="empty-state">ยังไม่มีข้อความ พิมพ์ข้อความแรกได้เลย!</div>';
-    return;
-  }
-  box.innerHTML = d.messages.map(m=>`
-    <div class="msg-bubble ${m.from === '{{ session_user.username }}'?'msg-me':'msg-other'}">
-      <div>${m.text}</div>
-      <div class="msg-time">${m.time}</div>
-    </div>
-  `).join('');
-  box.scrollTop = box.scrollHeight;
-  await refreshBadges();
-}
-
-async function sendChatMessage(){
-  const input = document.getElementById('chatInput');
-  const text = input.value.trim();
-  if(!text || !currentChatPartner) return;
-  input.value = '';
-  await fetch('/api/send-message',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({to:currentChatPartner, text:text})
-  });
-  await loadChatMessages();
-  await loadChatList();
-}
-
-function onChatEnter(e){
-  if(e.key === 'Enter') sendChatMessage();
-}
-
-document.getElementById('imageInput').addEventListener('change', async e=>{
-  for(const file of e.target.files){
-    const fd = new FormData();
-    fd.append('image', file);
-    const res = await fetch('/api/upload-image', {method:'POST', body:fd});
-    const d = await res.json();
-    if(d.success){
-      selectedImgs.push(d.url);
-      renderPreview();
-    }else alert('อัปโหลดไม่ได้: '+d.message);
-  }
-  e.target.value='';
-});
-function renderPreview(){
-  const c=document.getElementById('previewRow');
-  c.innerHTML=selectedImgs.map((u,i)=>`<div class="preview-item"><img src="${u}"><button class="preview-del" onclick="selectedImgs.splice(${i},1);renderPreview()">×</button></div>`).join('');
-}
-document.getElementById('postForm').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const res=await fetch('/api/post',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      category:document.getElementById('category').value,
-      title:document.getElementById('title').value,
-      detail:document.getElementById('detail').value,
-      images:selectedImgs
-    })
-  });
-  const d=await res.json();
-  if(d.success){
-    alert('✅ ลงประกาศสำเร็จ');
-    selectedImgs=[];
-    renderPreview();
-    showTab('market');
-    location.reload();
-  }else alert(d.message);
-});
-function showTab(name){
-  document.querySelectorAll('.content-tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById('tab'+name.charAt(0).toUpperCase()+name.slice(1)).classList.add('active');
-}
-function filterCat(cat){
-  document.querySelectorAll('.cattab').forEach(t=>t.classList.toggle('active',t.dataset.cat===cat));
-  document.querySelectorAll('.postcard').forEach(p=>{
-    p.style.display=(cat==='all' || p.dataset.cat===cat)?'block':'none';
-  });
-}
-async function delPost(id){
-  if(!confirm('ลบจริงหรือไม่?'))return;
-  const res=await fetch('/api/post/'+id,{method:'DELETE'});
-  const d=await res.json();
-  if(d.success)location.reload();
-  else alert(d.message);
-}
-async function doLogout(){
-  if(!confirm('ออกจากระบบหรือไม่?'))return;
-  await fetch('/api/logout');
-  location.href='/';
-}
-
-refreshBadges();
-pollTimer = setInterval(refreshBadges, 30000);
-</script>
-</body>
-</html>
-'''
-
-if __name__ == '__main__':
-    print("="*60)
-    print("🖤 FM_Market — ระบบแจ้งเตือนครบถ้วน")
-    print("✅ แจ้งเตือนคนทักมา + จำนวนข้อความไม่อ่าน")
-    print("✅ แชทส่วนตัวทำงาน")
-    print("="*60)
+  <div id="tabPost" class="
