@@ -2,9 +2,14 @@ services:
   - type: web
     name: fm-market
     env: python
-    plan: free
+    # Render Persistent Disks require a paid web service plan.
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
+    disk:
+      name: fm-market-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -12,3 +17,9 @@ services:
         generateValue: true
       - key: ADMIN_PASSWORD
         generateValue: true
+      - key: DATA_DIR
+        value: /var/data
+      - key: DB_FILE
+        value: /var/data/database.json
+      - key: UPLOAD_FOLDER
+        value: /var/data/uploads
