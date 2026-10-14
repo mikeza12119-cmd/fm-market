@@ -7,12 +7,14 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlparse
 
 app = Flask(__name__)
+# Set SECRET_KEY in the deployment environment. The fallback is for local development only.
 app.secret_key = os.environ.get("SECRET_KEY", "local-development-only-change-me")
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
 DB_FILE = os.environ.get("DB_FILE", os.path.join(DATA_DIR, "database.json"))
+# Store uploads beside the database by default so both can live on persistent storage.
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", os.path.join(DATA_DIR, "uploads"))
 AVATAR_FOLDER = os.path.join(UPLOAD_FOLDER, "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
@@ -28,6 +30,7 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def json_body():
+    """Return a JSON object or an empty dict for malformed/missing request bodies."""
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else {}
 
@@ -84,8 +87,7 @@ def load_database():
     }
     os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     if not os.path.exists(DB_FILE):
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_data, f, ensure_ascii=False, indent=2)
+        save_database(default_data)
         return default_data
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -97,11 +99,16 @@ def load_database():
             data[k] = default_data[k]
     for uname in data["users"]:
         user = data["users"][uname]
-        if "role" not in user: user["role"] = "member"
-        if "avatar" not in user: user["avatar"] = None
-        if "bio" not in user: user["bio"] = ""
-        if "profile_theme" not in user: user["profile_theme"] = "#d4af37"
-        if "profile_banner" not in user: user["profile_banner"] = None
+        if "role" not in user:
+            user["role"] = "member"
+        if "avatar" not in user:
+            user["avatar"] = None
+        if "bio" not in user:
+            user["bio"] = ""
+        if "profile_theme" not in user:
+            user["profile_theme"] = "#d4af37"
+        if "profile_banner" not in user:
+            user["profile_banner"] = None
     now = datetime.now()
     fresh_posts = []
     for p in data["posts"]:
@@ -112,11 +119,11 @@ def load_database():
         except Exception:
             fresh_posts.append(p)
     data["posts"] = fresh_posts
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_database(data)
     return data
 
 def save_database(data):
+    # Atomic replacement prevents a partial JSON file if the process is interrupted.
     os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     temp_file = DB_FILE + ".tmp"
     with open(temp_file, "w", encoding="utf-8") as f:
@@ -187,6 +194,7 @@ def get_profile():
 
 @app.route('/api/profile/<username>', methods=['GET'])
 def get_public_profile(username):
+    """Expose only public profile fields; never return passwords or private account data."""
     if 'user' not in session:
         return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     db = load_database()
@@ -227,12 +235,13 @@ def update_profile():
     save_database(db)
     return jsonify({"success": True, "message": "บันทึกโปรไฟล์เรียบร้อย"})
 
-@app.route('/api/admin/set-role', methods=['POST'])
+@app.route('/api/admin/set-role' , methods=['POST'])
 def set_role():
     if 'user' not in session:
         return jsonify({"success": False, "message": "กรุณาเข้าสู่ระบบ"}), 401
     db = load_database()
     actor = db["users"].get(session["user"].get("username"), {})
+    # Never trust the role stored in a client-side session cookie; roles may have changed.
     if actor.get("role") != "admin":
         session.pop("user", None)
         return jsonify({"success": False, "message": "ไม่มีสิทธิ์"}), 403
@@ -373,10 +382,12 @@ def delete_post(post_id):
     return jsonify({"success": True})
 
 def message_datetime(message):
+    """Parse legacy message timestamps for reliable chronological ordering."""
     try:
         return datetime.strptime(message.get("time", ""), "%d/%m/%Y %H:%M")
     except (TypeError, ValueError):
         return datetime.min
+
 
 @app.route('/api/chat-overview', methods=['GET'])
 def chat_overview():
@@ -385,6 +396,7 @@ def chat_overview():
     me = session['user']['username']
     db = load_database()
     conversations = {}
+    # Build a single inbox entry per conversation, regardless of who sent first.
     for msg in db.get("messages", []):
         sender, receiver = msg.get("from"), msg.get("to")
         if me not in (sender, receiver):
@@ -402,11 +414,13 @@ def chat_overview():
                 "_message": msg,
             }
         if receiver == me and not msg.get("read", False):
+            # Count unread messages independently of which message is newest.
             conversations.setdefault(other, {"last_msg": "", "type": "text", "time": "", "unread": 0, "_message": msg})["unread"] += 1
     for item in conversations.values():
         item.pop("_message", None)
     total_unread = sum(item["unread"] for item in conversations.values())
     return jsonify({"success": True, "contacts": conversations, "total_unread": total_unread})
+
 
 @app.route('/api/conversation/<partner>', methods=['GET'])
 def get_conversation(partner):
@@ -424,6 +438,7 @@ def get_conversation(partner):
         if msg.get("to") == me and not msg.get("read", False):
             msg["read"] = True
             changed = True
+    # Clear matching message notifications as soon as the recipient opens the thread.
     for notif in db.get("notifications", []):
         if notif.get("type") == "message" and notif.get("from") == partner and notif.get("to") == me and not notif.get("read", False):
             notif["read"] = True
@@ -432,6 +447,7 @@ def get_conversation(partner):
         save_database(db)
     conv.sort(key=message_datetime)
     return jsonify({"success": True, "messages": conv, "partner": partner})
+
 
 @app.route('/api/conversation/<partner>/read', methods=['POST'])
 def mark_conversation_read(partner):
@@ -451,6 +467,7 @@ def mark_conversation_read(partner):
     if changed:
         save_database(db)
     return jsonify({"success": True})
+
 
 @app.route('/api/send-message', methods=['POST'])
 def send_message():
@@ -494,8 +511,10 @@ def send_message():
         "time": new_msg["time"],
         "read": False
     })
+    # The message and notification are written to the database file before success is returned.
     save_database(db)
     return jsonify({"success": True, "message": new_msg})
+
 
 @app.route('/api/notifications', methods=['GET'])
 def get_notifications():
@@ -714,4 +733,427 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .post-foot{display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--border);font-size:.85rem;color:var(--soft)}
 .chat-btn-post{background:var(--blue);color:#fff;border:none;padding:8px 14px;border-radius:var(--r);font-weight:700}
 .del-btn{background:var(--red);color:#fff;border:none;padding:6px 10px;border-radius:8px;font-size:.8rem}
-.form-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:24px;max
+.form-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:24px;max-width:640px;margin:0 auto 30px}
+.form-card h3{color:var(--gold);margin-bottom:20px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;margin-bottom:6px;font-size:.9rem;color:var(--soft)}
+.form-input,select,textarea{width:100%;padding:12px 16px;background:#0a0a10;border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:1rem}
+.form-input:focus,select:focus,textarea:focus{outline:none;border-color:var(--gold)}
+.upload-area{border:2px dashed var(--border);border-radius:var(--r);padding:20px;text-align:center;margin:16px 0;transition:.2s;cursor:pointer}
+.upload-area:hover{border-color:var(--gold)}
+.preview-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
+.preview-item{position:relative;width:90px;height:90px}
+.preview-item img{width:100%;height:100%;object-fit:cover;border-radius:var(--r)}
+.preview-del{position:absolute;top:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;border:none;width:24px;height:24px;border-radius:50%;font-size:1rem;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.content-tab{display:none}
+.content-tab.active{display:block;animation:fadeIn .3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.profile-card{max-width:500px;margin:0 auto}
+.profile-avatar-row{display:flex;align-items:center;gap:20px;margin-bottom:24px}
+.profile-avatar-frame{width:100px;height:100px;border-radius:50%;padding:4px;cursor:pointer}
+.profile-avatar-frame.admin{background:linear-gradient(135deg,#ffd700,#ffed4e,#ffd700)}
+.profile-avatar-frame.vip{background:linear-gradient(135deg,#9932cc,#da70d6,#9932cc)}
+.profile-avatar-frame.member{background:linear-gradient(135deg,#4b5563,#6b7280,#4b5563)}
+.profile-avatar-img{width:100%;height:100%;border-radius:50%;object-fit:cover;border:3px solid #000}
+.profile-avatar-placeholder{width:100%;height:100%;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1f2937;font-size:2rem;border:3px solid #000}
+.profile-info h2{font-size:1.4rem;margin-bottom:4px}
+.profile-role{display:inline-block;padding:4px 12px;border-radius:12px;font-weight:700;font-size:.85rem;margin-bottom:10px}
+.profile-role.admin{background:linear-gradient(90deg,#b8860b,#ffd700);color:#000}
+.profile-role.vip{background:linear-gradient(90deg,#8b00ff,#da70d6);color:#fff}
+.profile-role.member{background:linear-gradient(90deg,#374151,#6b7280);color:#fff}
+.profile-bio{color:#ccc;white-space:pre-line;margin-bottom:10px}
+.profile-meta{font-size:.8rem;color:var(--soft)}
+.profile-link{background:none;border:0;color:var(--gold);font:inherit;font-weight:700;text-decoration:underline;cursor:pointer;padding:0}
+.public-profile-overlay{display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.78);align-items:center;justify-content:center;padding:18px}
+.public-profile-overlay.show{display:flex}
+.public-profile-card{width:min(100%,480px);background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;position:relative}
+.public-profile-close{position:absolute;right:14px;top:10px;background:transparent;border:0;color:var(--text);font-size:1.6rem;cursor:pointer}
+.public-profile-bio{white-space:pre-wrap;color:var(--soft);margin-top:14px;overflow-wrap:anywhere}
+
+.admin-role-section{margin-top:20px;padding-top:20px;border-top:1px dashed var(--border)}
+.hidden-input{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="head">
+    <div class="brand" onclick="showTab('market')"><span>FM</span>_Market</div>
+    <nav class="nav">
+      <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
+      <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
+      <div class="notif-wrap">
+        <button class="bell-btn" onclick="toggleNotif()">🔔<span id="notifBadge" class="badge-count">0</span></button>
+        <div id="notifPanel" class="dropdown-panel">
+          <div class="panel-head">
+            <span class="panel-title">🔔 การแจ้งเตือน</span>
+            <div class="panel-actions">
+              <button onclick="markAllNotifRead()">อ่านทั้งหมด</button>
+            </div>
+          </div>
+          <div id="notifList" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
+        </div>
+      </div>
+      <div class="chat-wrap">
+        <button class="bell-btn" onclick="toggleChatList()">💬<span id="chatBadge" class="badge-count">0</span></button>
+        <div id="chatListPanel" class="dropdown-panel">
+          <div class="panel-head">
+            <span class="panel-title">💬 ข้อความ</span>
+            <div class="panel-actions"><button onclick="markAllChatRead()">อ่านทั้งหมด</button></div>
+          </div>
+          <div id="chatListBody" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
+        </div>
+      </div>
+      <div class="profile-wrap">
+        <button class="profile-btn" onclick="showTab('profile')">👤 {{ session_user.username }}</button>
+      </div>
+      {% if session_user.role == 'admin' %}
+      <span class="badge badge-admin">ผู้ดูแล</span>
+      {% elif session_user.role == 'vip' %}
+      <span class="badge" style="background:linear-gradient(90deg,#8b00ff,#da70d6);color:#fff">VIP</span>
+      {% else %}
+      <span class="badge badge-member">สมาชิก</span>
+      {% endif %}
+      <button class="btn btn-sm btn-red" onclick="doLogout()">ออก</button>
+    </nav>
+  </div>
+</header>
+
+<button class="chat-launcher" type="button" onclick="toggleChatList()" aria-label="เปิดแชท" title="เปิดแชท">💬</button>
+<div id="chatOverlay" class="chat-overlay">
+  <div class="chat-window" onclick="event.stopPropagation()">
+    <div class="chat-header">
+      <div><div id="chatPartnerName" class="panel-title">แชท</div><div style="font-size:.72rem;color:var(--soft)">FM_Market Messenger</div></div>
+      <button class="chat-close" onclick="closeChat()" aria-label="ปิดแชท">×</button>
+    </div>
+    <div id="chatMessages" class="chat-messages"><div class="empty-state">เลือกผู้ติดต่อเพื่อเริ่มแชท</div></div>
+    <div id="emojiPicker" class="emoji-picker" aria-label="เลือกอีโมจิ"></div>
+    <div id="gifPanel" class="gif-panel">
+      <input type="url" id="gifUrlInput" placeholder="วางลิงก์ GIF จาก Tenor / GIPHY">
+      <button class="chat-send-btn" type="button" onclick="sendGifMessage()">ส่ง GIF</button>
+      <button class="btn btn-sm btn-ghost" type="button" onclick="searchGif()">ค้นหา</button>
+      <div class="gif-help">ใช้ลิงก์ไฟล์ GIF โดยตรงจาก media.tenor.com หรือ media.giphy.com</div>
+    </div>
+    <div class="chat-input-area">
+      <button class="chat-tool-btn" type="button" title="อีโมจิ" onclick="toggleEmojiPicker()">😊</button>
+      <button class="chat-tool-btn" type="button" title="ส่ง GIF" onclick="toggleGifPanel()">GIF</button>
+      <input type="text" id="chatInput" placeholder="พิมพ์ข้อความ..." onkeydown="onChatEnter(event)" autocomplete="off">
+      <button class="chat-send-btn" onclick="sendChatMessage()">ส่ง</button>
+    </div>
+  </div>
+</div>
+
+<div id="publicProfileOverlay" class="public-profile-overlay" role="dialog" aria-modal="true" aria-labelledby="publicProfileName" onclick="if(event.target===this)closePublicProfile()">
+  <div class="public-profile-card">
+    <button class="public-profile-close" type="button" aria-label="ปิด" onclick="closePublicProfile()">×</button>
+    <div id="publicProfileBanner" style="height:110px;border-radius:12px;background:linear-gradient(120deg,#202020,#4b3b14);margin:0 0 18px;background-size:cover;background-position:center"></div>
+    <div class="profile-avatar-row">
+      <div id="publicProfileAvatar" class="profile-avatar-frame member"><div class="profile-avatar-placeholder">👤</div></div>
+      <div class="profile-info"><h2 id="publicProfileName">โปรไฟล์สมาชิก</h2><span id="publicProfileRole" class="profile-role member">สมาชิกทั่วไป</span><div id="publicProfileCreated" class="profile-meta"></div></div>
+    </div>
+    <h4>แนะนำตัว</h4><div id="publicProfileBio" class="public-profile-bio">ยังไม่ได้แนะนำตัว</div>
+    <div style="margin-top:22px"><button id="publicProfileChat" class="btn btn-blue" type="button">💬 ส่งข้อความ</button></div>
+  </div>
+</div>
+
+<main class="container">
+  <div id="tabMarket" class="content-tab active">
+    <h2 class="sectitle">📢 ประกาศจากระบบ</h2>
+    {% for n in news %}
+    <div class="postcard">
+      <div style="font-size:.8rem;color:var(--soft);margin-bottom:6px">{{ n.date }}</div>
+      <h4 style="margin-bottom:6px">{{ n.title }}</h4>
+      <p style="color:var(--soft)">{{ n.content }}</p>
+    </div>
+    {% endfor %}
+    <section class="alert-block">
+      <h3>🛡️ วิธีใช้งานอย่างปลอดภัย</h3>
+      <ol>
+        <li>ตกลงรายละเอียดผ่านแชทในระบบเท่านั้น</li>
+        <li>โอนเงินผ่านบัญชีกลางของแอดมิน</li>
+        <li>แจ้งหลักฐาน → แอดมินยืนยันการทำรายการ</li>
+        <li>ผู้ขายส่งของ → ผู้ซื้อตรวจสอบ → ระบบจ่ายเงินให้ผู้ขาย</li>
+      </ol>
+      <p class="warn">⚠️ ห้ามโอนเงินให้ผู้อื่นโดยตรง — เราไม่รับผิดชอบหากไม่ทำตาม</p>
+    </section>
+    <h2 class="sectitle">📋 รายการซื้อขาย</h2>
+    <div class="catnav">
+      <button class="cattab active" data-cat="all" onclick="filterCat('all')">ทั้งหมด</button>
+      {% for k,v in categories.items() %}
+      <button class="cattab" data-cat="{{k}}" onclick="filterCat('{{k}}')">{{v.icon}} {{v.name}}</button>
+      {% endfor %}
+    </div>
+    <div id="postList">
+      {% if posts %}
+      {% for p in posts %}
+      {% set author_data = all_users[p.author] %}
+      {% set role_info = get_role_config(author_data.role) %}
+      <div class="postcard" data-cat="{{p.category}}">
+        <div class="post-header">
+          <div class="avatar-wrap {{author_data.role}}">
+            {% if author_data.avatar %}
+            <img src="{{author_data.avatar}}" class="avatar-img" alt="">
+            {% else %}
+            <div class="avatar-placeholder">{{p.author[0]|upper}}</div>
+            {% endif %}
+          </div>
+          <div style="flex:1">
+            <div class="post-title">{{ p.title }}</div>
+            <div class="post-meta-row">
+              <span>{{role_info.badge}} <button class="profile-link" type="button" onclick="openPublicProfile({{ p.author|tojson }})">{{p.author}}</button></span>
+              <span class="role-badge" style="background:{{role_info.bg_badge}};color:#fff">{{role_info.name}}</span>
+              <span style="color:var(--soft)">{{ p.time }}</span>
+            </div>
+          </div>
+          {% if p.author == session_user.username or session_user.role == 'admin' %}
+          <button class="del-btn" onclick="delPost('{{p.id}}')">ลบ</button>
+          {% endif %}
+        </div>
+        <p class="post-desc">{{ p.detail }}</p>
+        {% if p.images %}
+        <div class="post-imgs">
+          {% for img in p.images %}
+          <img src="{{img}}" alt="" onclick="window.open('{{img}}')">
+          {% endfor %}
+        </div>
+        {% endif %}
+        <div class="post-foot">
+          <span>👤 <button class="profile-link" type="button" onclick="openPublicProfile({{ p.author|tojson }})">{{ p.author }}</button></span>
+          <span>{{ p.time }}</span>
+          <button class="chat-btn-post" onclick="openChatWith('{{p.author}}')">💬 คุยด้วย</button>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="empty-state">ยังไม่มีรายการ — เป็นคนแรกที่ลงประกาศเลย!</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div id="tabPost" class="content-tab">
+    <div class="form-card">
+      <h3>✍️ ลงประกาศสินค้า</h3>
+      <form id="postForm" onsubmit="submitPost(event)">
+        <div class="form-group">
+          <label>หมวดหมู่</label>
+          <select id="category" class="form-input">
+            {% for k,v in categories.items() %}
+            <option value="{{k}}">{{v.icon}} {{v.name}}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>หัวข้อ *</label>
+          <input type="text" id="title" class="form-input" placeholder="เช่น ขายเงิน M ราคาถูก" required>
+        </div>
+        <div class="form-group">
+          <label>รายละเอียด</label>
+          <textarea id="detail" class="form-input" rows="4" placeholder="เช่น ราคา 100 บาท ต่อ 1M..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>รูปภาพ (สูงสุด 5 รูป)</label>
+          <div class="upload-area" onclick="document.getElementById('imgUpload').click()">
+            📷 คลิกเพื่ออัปโหลดรูป
+          </div>
+          <input type="file" id="imgUpload" accept="image/*" multiple class="hidden-input" onchange="handleImgUpload(this.files)">
+          <div id="imgPreviewRow" class="preview-row"></div>
+        </div>
+        <button type="submit" class="btn btn-gold" style="
+padding:12px 24px;width:100%">ลงประกาศ</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="tabProfile" class="content-tab">
+    <div class="form-card profile-card">
+      <h3>👤 โปรไฟล์ของฉัน</h3>
+      <div id="myProfileBanner" style="height:110px;border-radius:12px;background:linear-gradient(120deg,#202020,#4b3b14);margin:0 0 18px;background-size:cover;background-position:center"></div>
+      <div class="profile-avatar-row">
+        <div id="profileAvatar" class="profile-avatar-frame member" onclick="document.getElementById('avatarUpload').click()">
+          <div class="profile-avatar-placeholder">👤</div>
+        </div>
+        <div class="profile-info">
+          <h2 id="profileUsername">{{ session_user.username }}</h2>
+          <span id="profileRole" class="profile-role member">สมาชิกทั่วไป</span>
+          <div id="profileCreated" class="profile-meta"></div>
+        </div>
+      </div>
+      <input id="avatarUpload" class="hidden-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" onchange="uploadAvatar(this.files[0])">
+      <div class="form-group">
+        <label for="profileTheme">สีธีมโปรไฟล์</label>
+        <input id="profileTheme" type="color" class="form-input" value="#d4af37" style="height:48px;padding:4px;max-width:100px">
+      </div>
+      <div class="form-group">
+        <label for="profileBio">แนะนำตัว (เขียนได้หลายบรรทัด)</label>
+        <textarea id="profileBio" class="form-input" rows="4" maxlength="500" placeholder="เขียนแนะนำตัว..."></textarea>
+      </div>
+      <button class="btn btn-gold" onclick="saveProfile()">บันทึกโปรไฟล์</button>
+      {% if session_user.role == 'admin' %}
+      <div class="admin-role-section">
+        <h3>👑 จัดการยศสมาชิก</h3>
+        <div class="form-group"><label>ชื่อผู้ใช้</label><input id="roleUsername" class="form-input" placeholder="ชื่อสมาชิก"></div>
+        <div class="form-group"><label>ยศ</label><select id="roleValue" class="form-input"><option value="member">สมาชิกทั่วไป</option><option value="vip">VIP</option><option value="admin">ผู้ดูแลระบบ</option></select></div>
+        <button class="btn btn-blue" onclick="setUserRole()">เปลี่ยนยศ</button>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</main>
+
+<script>
+let uploadedImages = [];
+let currentPartner = null;
+const currentUsername = {{ session_user.username|tojson }};
+
+function showTab(tab) {
+  document.querySelectorAll('.content-tab').forEach(el => el.classList.remove('active'));
+  const target = document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1));
+  if (target) target.classList.add('active');
+  if (tab === 'profile') loadProfile();
+}
+function filterCat(cat) {
+  document.querySelectorAll('.cattab').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
+  document.querySelectorAll('#postList .postcard[data-cat]').forEach(p => p.style.display = (cat === 'all' || p.dataset.cat === cat) ? '' : 'none');
+}
+async function api(url, options={}) {
+  const response = await fetch(url, options);
+  let data;
+  try { data = await response.json(); } catch (_) { throw new Error('เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง'); }
+  if (!response.ok) throw new Error(data.message || 'เกิดข้อผิดพลาด');
+  return data;
+}
+async function submitPost(e) {
+  e.preventDefault();
+  try {
+    const d = await api('/api/post', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category:document.getElementById('category').value,title:document.getElementById('title').value,detail:document.getElementById('detail').value,images:uploadedImages})});
+    if (!d.success) throw new Error(d.message || 'ลงประกาศไม่สำเร็จ');
+    alert('ลงประกาศสำเร็จ'); location.reload();
+  } catch (err) { alert(err.message); }
+}
+async function handleImgUpload(files) {
+  for (const file of Array.from(files)) {
+    if (uploadedImages.length >= 5) { alert('อัปโหลดได้สูงสุด 5 รูป'); break; }
+    if (!file.type.startsWith('image/')) { alert('กรุณาเลือกไฟล์รูปภาพ'); continue; }
+    const form = new FormData(); form.append('image', file);
+    try {
+      const d = await api('/api/upload-image', {method:'POST',body:form});
+      if (d.success) { uploadedImages.push(d.url); renderImagePreviews(); }
+      else alert(d.message || 'อัปโหลดไม่สำเร็จ');
+    } catch (err) { alert(err.message); }
+  }
+  document.getElementById('imgUpload').value = '';
+}
+function renderImagePreviews() {
+  const row = document.getElementById('imgPreviewRow'); row.replaceChildren();
+  uploadedImages.forEach((url, i) => {
+    const wrap = document.createElement('div'); wrap.className = 'preview-item';
+    const img = document.createElement('img'); img.src = url; img.alt = 'ตัวอย่างรูป';
+    const btn = document.createElement('button'); btn.type='button'; btn.className='preview-del'; btn.textContent='×'; btn.onclick=()=>{uploadedImages.splice(i,1);renderImagePreviews();};
+    wrap.append(img,btn); row.append(wrap);
+  });
+}
+async function delPost(id) {
+  if (!confirm('ยืนยันลบประกาศนี้?')) return;
+  try { const d = await api('/api/post/'+encodeURIComponent(id),{method:'DELETE'}); if(!d.success) throw new Error(d.message || 'ลบไม่สำเร็จ'); location.reload(); }
+  catch(err){alert(err.message);}
+}
+async function doLogout() {
+  try { await api('/api/logout'); location.href='/'; } catch(err){alert(err.message);}
+}
+async function openPublicProfile(username) {
+  try {
+    const d = await api('/api/profile/' + encodeURIComponent(username));
+    if (!d.success) throw new Error(d.message || 'เปิดโปรไฟล์ไม่สำเร็จ');
+    document.getElementById('publicProfileName').textContent = d.username;
+    document.getElementById('publicProfileCreated').textContent = 'สมัครเมื่อ ' + (d.created_at || '-');
+    document.getElementById('publicProfileBio').textContent = d.bio || 'ยังไม่ได้แนะนำตัว';
+    const banner=document.getElementById('publicProfileBanner'); banner.style.backgroundColor=d.profile_theme||'#d4af37'; banner.style.backgroundImage=d.profile_banner ? `url('${d.profile_banner}')` : `linear-gradient(120deg,${d.profile_theme||'#d4af37'},#171717)`; document.querySelector('.public-profile-card').style.setProperty('--profile-accent',d.profile_theme||'#d4af37');
+    const role = document.getElementById('publicProfileRole');
+    role.textContent = d.role_info.name; role.className = 'profile-role ' + d.role;
+    const frame = document.getElementById('publicProfileAvatar');
+    frame.className = 'profile-avatar-frame ' + d.role; frame.replaceChildren();
+    if (d.avatar) { const img = document.createElement('img'); img.src = d.avatar; img.className = 'profile-avatar-img'; img.alt = 'รูปโปรไฟล์'; frame.append(img); }
+    else { const placeholder = document.createElement('div'); placeholder.className = 'profile-avatar-placeholder'; placeholder.textContent = (d.username[0] || '?').toUpperCase(); frame.append(placeholder); }
+    const chat = document.getElementById('publicProfileChat');
+    chat.style.display = d.username === currentUsername ? 'none' : '';
+    chat.onclick = () => { closePublicProfile(); openChatWith(d.username); };
+    document.getElementById('publicProfileOverlay').classList.add('show');
+  } catch (err) { alert(err.message); }
+}
+function closePublicProfile() { document.getElementById('publicProfileOverlay').classList.remove('show'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePublicProfile(); });
+
+async function loadProfile() {
+  try {
+    const d = await api('/api/profile'); if(!d.success) return;
+    document.getElementById('profileUsername').textContent=d.username;
+    document.getElementById('profileBio').value=d.bio || '';
+    document.getElementById('profileTheme').value=d.profile_theme || '#d4af37';
+    const banner=document.getElementById('myProfileBanner'); banner.style.backgroundImage=d.profile_banner ? `url('${d.profile_banner}')` : `linear-gradient(120deg,${d.profile_theme||'#d4af37'},#171717)`;
+    document.getElementById('profileCreated').textContent='สมัครเมื่อ '+(d.created_at || '-');
+    const role = document.getElementById('profileRole'); role.textContent=d.role_info.name; role.className='profile-role '+d.role;
+    const frame=document.getElementById('profileAvatar'); frame.className='profile-avatar-frame '+d.role;
+    frame.replaceChildren();
+    if(d.avatar){const img=document.createElement('img');img.src=d.avatar;img.className='profile-avatar-img';img.alt='รูปโปรไฟล์';frame.append(img);}
+    else {const placeholder=document.createElement('div');placeholder.className='profile-avatar-placeholder';placeholder.textContent=(d.username[0]||'?').toUpperCase();frame.append(placeholder);}
+  } catch(err){console.error(err);}
+}
+async function saveProfile() {
+  try { const d=await api('/api/profile/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bio:document.getElementById('profileBio').value,profile_theme:document.getElementById('profileTheme').value})}); alert(d.message || 'บันทึกแล้ว'); }
+  catch(err){alert(err.message);}
+}
+async function uploadAvatar(file) {
+  if(!file) return;
+  const form=new FormData();form.append('avatar',file);
+  try {const d=await api('/api/upload-avatar',{method:'POST',body:form});if(!d.success)throw new Error(d.message||'อัปโหลดไม่สำเร็จ');await loadProfile();alert('เปลี่ยนรูปโปรไฟล์แล้ว');}
+  catch(err){alert(err.message);} finally {document.getElementById('avatarUpload').value='';}
+}
+async function setUserRole() {
+  try {const d=await api('/api/admin/set-role',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('roleUsername').value,role:document.getElementById('roleValue').value})});alert(d.message || (d.success?'เปลี่ยนยศสำเร็จ':'ทำรายการไม่สำเร็จ'));}
+  catch(err){alert(err.message);}
+}
+function toggleNotif(){document.getElementById('notifPanel').classList.toggle('show');loadNotifications();}
+function toggleChatList(){document.getElementById('chatListPanel').classList.toggle('show');loadChatOverview();}
+async function loadNotifications(){
+  try {const d=await api('/api/notifications');const list=document.getElementById('notifList');list.replaceChildren();
+    const badge=document.getElementById('notifBadge');badge.textContent=d.unread_count;badge.classList.toggle('show',d.unread_count>0);
+    if(!d.notifications.length){list.innerHTML='<div class="empty-state">ไม่มีการแจ้งเตือน</div>';return;}
+    [...d.notifications].reverse().forEach(n=>{const el=document.createElement('div');el.className='panel-item'+(!n.read?' unread':'');const name=document.createElement('div');name.className='panel-item-name';name.textContent=n.type==='message'?'💬 ข้อความใหม่':'แจ้งเตือน';const body=document.createElement('div');body.className='panel-item-text';body.textContent=n.text;const time=document.createElement('div');time.className='panel-item-time';time.textContent=n.time;el.append(name,body,time);if(n.type==='message'&&n.from&&n.from!==currentUsername){el.title='คลิกเพื่อเปิดแชท';el.onclick=()=>{document.getElementById('notifPanel').classList.remove('show');openChatWith(n.from);};}list.append(el);});
+  }catch(err){console.error(err);}
+}
+async function markAllNotifRead(){try{await api('/api/notifications/mark-read',{method:'POST'});loadNotifications();}catch(err){alert(err.message);}}
+async function loadChatOverview(){
+  try {const d=await api('/api/chat-overview');const body=document.getElementById('chatListBody');body.replaceChildren();const badge=document.getElementById('chatBadge');badge.textContent=d.total_unread;badge.classList.toggle('show',d.total_unread>0);const toDate=t=>{const [date,time]=(t||'').split(' ');const parts=(date||'').split('/').map(Number);const clock=(time||'').split(':').map(Number);return parts.length===3&&clock.length===2?new Date(parts[2],parts[1]-1,parts[0],clock[0],clock[1]).getTime():0;};const contacts=Object.entries(d.contacts).sort((a,b)=>toDate(b[1].time)-toDate(a[1].time));
+    if(!contacts.length){body.innerHTML='<div class="empty-state">ยังไม่มีข้อความ</div>';return;}
+    contacts.forEach(([name,c])=>{const el=document.createElement('div');el.className='panel-item'+(c.unread?' unread':'');const title=document.createElement('div');title.className='panel-item-name';title.textContent=name+(c.unread?' ('+c.unread+')':'');const msg=document.createElement('div');msg.className='panel-item-text';msg.textContent=c.last_msg;const time=document.createElement('div');time.className='panel-item-time';time.textContent=c.time;el.append(title,msg,time);el.onclick=()=>{document.getElementById('chatListPanel').classList.remove('show');openChatWith(name);};body.append(el);});
+  }catch(err){console.error(err);}
+}
+async function markAllChatRead(){try{const d=await api('/api/chat-overview');for(const name of Object.keys(d.contacts||{})){await api('/api/conversation/'+encodeURIComponent(name)+'/read',{method:'POST'});}await loadChatOverview();}catch(err){alert(err.message);}}
+async function openChatWith(name){if(name===currentUsername){alert('ไม่สามารถแชตกับตัวเองได้');return;}currentPartner=name;document.getElementById('chatPartnerName').textContent=name;document.getElementById('chatOverlay').classList.add('show');await loadConversation();}
+function closeChat(){document.getElementById('chatOverlay').classList.remove('show');currentPartner=null;loadChatOverview();}
+const emojiChoices=['😀','😃','😄','😁','😆','😅','😂','🤣','🥹','😊','😍','🥰','😘','😎','🤔','😭','😢','😡','👍','👎','👏','🙏','🔥','❤️','💛','💖','🎉','✨','💯','🤝','🙌','😴','🤗','😇','😋','🤩','💔','💸','🚗','🎮','🐱','🐶','🌈','☀️','🌙','🍀','💎','👑'];
+function initEmojiPicker(){const picker=document.getElementById('emojiPicker');if(!picker||picker.dataset.ready)return;emojiChoices.forEach(emoji=>{const b=document.createElement('button');b.type='button';b.className='emoji-choice';b.textContent=emoji;b.title=emoji;b.onclick=()=>{const input=document.getElementById('chatInput');input.value+=emoji;input.focus();};picker.append(b);});picker.dataset.ready='1';}
+function toggleEmojiPicker(){initEmojiPicker();document.getElementById('emojiPicker').classList.toggle('show');document.getElementById('gifPanel').classList.remove('show');}
+function toggleGifPanel(){document.getElementById('gifPanel').classList.toggle('show');document.getElementById('emojiPicker').classList.remove('show');}
+function searchGif(){const q=encodeURIComponent(document.getElementById('chatInput').value.trim()||'reaction');window.open('https://tenor.com/search/'+q+'-gifs','_blank','noopener,noreferrer');}
+async function loadConversation(){
+  if(!currentPartner)return;
+  try{const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));const box=document.getElementById('chatMessages');box.replaceChildren();d.messages.forEach(m=>{const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');if(m.type==='gif'){const img=document.createElement('img');img.className='msg-gif';img.src=m.text;img.alt='GIF';img.loading='lazy';img.referrerPolicy='no-referrer';img.onerror=()=>{img.replaceWith(document.createTextNode('เปิด GIF ไม่ได้ — ลิงก์อาจหมดอายุ'));};wrap.append(img);}else{const content=document.createElement('div');content.textContent=m.text;wrap.append(content);}const time=document.createElement('div');time.className='msg-time';time.textContent=m.time;wrap.append(time);box.append(wrap);});box.scrollTop=box.scrollHeight;loadChatOverview();}
+  catch(err){console.error(err);const box=document.getElementById('chatMessages');box.replaceChildren();const error=document.createElement('div');error.className='empty-state';error.textContent=err.message||'เปิดประวัติแชทไม่สำเร็จ';box.append(error);}
+}
+function onChatEnter(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}}
+async function postChatPayload(payload){if(!currentPartner){alert('กรุณาเลือกผู้ติดต่อก่อน');return false;}try{const d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,...payload})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');await loadConversation();loadNotifications();return true;}catch(err){alert(err.message);return false;}}
+async function sendChatMessage(){const input=document.getElementById('chatInput');const message=input.value.trim();if(!message)return;if(await postChatPayload({text:message,type:'text'})){input.value='';document.getElementById('emojiPicker').classList.remove('show');}}
+async function sendGifMessage(){const input=document.getElementById('gifUrlInput');const url=input.value.trim();if(!url){alert('วางลิงก์ GIF ก่อนส่ง');return;}if(await postChatPayload({text:url,type:'gif'})){input.value='';document.getElementById('gifPanel').classList.remove('show');}}
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.notif-wrap'))document.getElementById('notifPanel').classList.remove('show');
+  if(!e.target.closest('.chat-wrap'))document.getElementById('chatListPanel').classList.remove('show');
+});
+loadNotifications();loadChatOverview();
+setInterval(()=>{loadNotifications();loadChatOverview();if(currentPartner)loadConversation();},10000);
+</script>
+</body>
+</html>
+'''
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
