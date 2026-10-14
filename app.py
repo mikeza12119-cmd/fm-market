@@ -7,7 +7,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "fm_market_secure_key_2026_fixed_v3"
+app.secret_key = "fm_market_secure_key_2026_final"
 
 DB_FILE = "database.json"
 UPLOAD_FOLDER = "uploads"
@@ -771,10 +771,4 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <input type="file" id="imgUpload" accept="image/*" multiple class="hidden-input" onchange="handleImgUpload(this.files)">
           <div id="imgPreviewRow" class="preview-row"></div>
         </div>
-        <button type="submit" class="btn btn-gold" style="width:100%;margin-top:10px">📤 ลงประกาศ</button>
-      </form>
-    </div>
-  </div>
-
-  <div id="tabProfile" class="content-tab">
-   
+        <button type="submit" class="btn btn-gold" style="
