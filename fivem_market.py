@@ -789,4 +789,4 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <label>หมวดหมู่</label>
           <select id="category" class="form-input">
             {% for k,v in categories.items() %}
-            <option value="{{k}}">{{v
+            <option
