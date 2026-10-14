@@ -789,4 +789,10 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <label>หมวดหมู่</label>
           <select id="category" class="form-input">
             {% for k,v in categories.items() %}
-            <option
+            <option value="{{k}}">{{v.icon}} {{v.name}}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>หัวข้อ</label>
+          <input type="text" id
