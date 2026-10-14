@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 app.secret_key = "fm_market_secure_key_2026_final"
@@ -352,13 +353,23 @@ def send_message():
     me = session['user']['username']
     receiver = d.get("to")
     text = d.get("text", "").strip()
+    msg_type = d.get("type", "text")
     if not receiver or not text or receiver == me or receiver not in db["users"]:
         return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"})
+    if msg_type not in ("text", "gif"):
+        return jsonify({"success": False, "message": "รูปแบบข้อความไม่ถูกต้อง"})
+    if msg_type == "gif":
+        parsed = urlparse(text)
+        host = (parsed.hostname or "").lower()
+        allowed_gif_hosts = ("media.tenor.com", "tenor.com", "media.giphy.com", "i.giphy.com", "giphy.com")
+        if parsed.scheme != "https" or not any(host == h or host.endswith("." + h) for h in allowed_gif_hosts):
+            return jsonify({"success": False, "message": "กรุณาใช้ลิงก์ GIF จาก Tenor หรือ GIPHY ที่ขึ้นต้นด้วย https://"})
     new_msg = {
         "id": str(uuid.uuid4())[:8],
         "from": me,
         "to": receiver,
         "text": text,
+        "type": msg_type,
         "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
         "read": False
     }
@@ -537,18 +548,33 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .panel-item-text{font-size:.85rem;color:var(--soft);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .panel-item-time{font-size:.7rem;color:#555;margin-top:4px}
 .empty-state{padding:30px;text-align:center;color:var(--soft);font-size:.9rem}
-.chat-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:3000;display:none;align-items:flex-end;justify-content:flex-end;padding:20px}
+.chat-overlay{position:fixed;inset:0;background:transparent;z-index:3000;display:none;align-items:flex-end;justify-content:flex-end;padding:88px 22px 86px;pointer-events:none}
 .chat-overlay.show{display:flex}
-.chat-window{width:100%;max-width:400px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);display:flex;flex-direction:column;max-height:520px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
-.chat-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
-.chat-close{background:none;border:none;color:var(--soft);font-size:1.3rem;cursor:pointer}
-.chat-messages{flex:1;padding:16px;overflow-y:auto;min-height:300px;background:#0a0a10;display:flex;flex-direction:column;gap:10px}
-.msg-bubble{max-width:80%;padding:10px 14px;border-radius:18px;line-height:1.4}
-.msg-me{background:#1e3a5f;align-self:flex-end;border-bottom-right-radius:4px}
-.msg-other{background:#2a2a3a;align-self:flex-start;border-bottom-left-radius:4px}
-.msg-time{font-size:.7rem;color:var(--soft);margin-top:4px;text-align:right}
-.chat-input-area{display:flex;gap:8px;padding:12px;border-top:1px solid var(--border)}
-.chat-input-area input{flex:1;background:#0a0a10;border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;color:var(--text);font-size:.9rem}
+.chat-window{pointer-events:auto;width: min(380px, calc(100vw - 28px));background:var(--card);border:1px solid #343449;border-radius:18px;display:flex;flex-direction:column;height:min(560px, calc(100vh - 120px));box-shadow:0 18px 55px rgba(0,0,0,.62);overflow:hidden;animation:chatPop .18s ease-out}
+@keyframes chatPop{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.chat-header{padding:13px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:linear-gradient(110deg,#191925,#11111a)}
+.chat-close{background:#252535;border:none;color:var(--soft);font-size:1.25rem;width:30px;height:30px;border-radius:50%;cursor:pointer}
+.chat-messages{flex:1;padding:16px;overflow-y:auto;min-height:160px;background:#0a0a10;display:flex;flex-direction:column;gap:10px}
+.msg-bubble{max-width:84%;padding:10px 13px;border-radius:18px;line-height:1.4;overflow-wrap:anywhere}
+.msg-me{background:linear-gradient(135deg,#d4af37,#f0c808);color:#15120a;align-self:flex-end;border-bottom-right-radius:5px}
+.msg-other{background:#252535;color:#f5f5f8;align-self:flex-start;border-bottom-left-radius:5px}
+.msg-time{font-size:.68rem;color:var(--soft);margin-top:4px;text-align:right}
+.msg-gif{display:block;width:min(230px,65vw);max-height:220px;object-fit:contain;border-radius:12px;background:#15151e}
+.chat-input-area{display:flex;align-items:center;gap:7px;padding:10px;border-top:1px solid var(--border);background:#12121a}
+.chat-input-area input{min-width:0;flex:1;background:#0a0a10;border:1px solid var(--border);border-radius:18px;padding:10px 13px;color:var(--text);font-size:.9rem}
+.chat-tool-btn{flex:0 0 auto;border:1px solid #333348;background:#20202d;color:#f6d86a;border-radius:50%;width:36px;height:36px;cursor:pointer;font-weight:800}
+.chat-send-btn{flex:0 0 auto;border:0;background:linear-gradient(90deg,var(--gold),var(--gold2));color:#111;border-radius:18px;padding:10px 13px;font-weight:800;cursor:pointer}
+.emoji-picker{display:none;grid-template-columns:repeat(8,1fr);gap:4px;padding:10px;background:#181823;border-top:1px solid var(--border);max-height:150px;overflow:auto}
+.emoji-picker.show{display:grid}
+.emoji-choice{border:0;background:transparent;border-radius:7px;padding:5px;font-size:1.25rem;cursor:pointer}.emoji-choice:hover{background:#303044}
+.gif-panel{display:none;gap:7px;padding:10px;background:#181823;border-top:1px solid var(--border)}
+.gif-panel.show{display:flex;flex-wrap:wrap}
+.gif-panel input{min-width:0;flex:1;background:#090910;border:1px solid var(--border);border-radius:9px;padding:9px;color:#fff}
+.gif-help{width:100%;font-size:.72rem;color:var(--soft)}
+.chat-launcher{position:fixed;right:22px;bottom:20px;z-index:2999;width:58px;height:58px;border:2px solid rgba(255,255,255,.18);border-radius:50%;background:linear-gradient(135deg,#d4af37,#f0c808);color:#17130a;font-size:1.55rem;box-shadow:0 8px 25px rgba(0,0,0,.45);cursor:pointer;transition:transform .2s}
+.chat-launcher:hover{transform:translateY(-3px) scale(1.03)}
+.chat-wrap .dropdown-panel{position:fixed;top:auto;right:22px;bottom:88px;width:min(340px,calc(100vw - 28px));max-height:min(480px,calc(100vh - 130px))}
+@media(max-width:520px){.chat-overlay{padding:12px 8px 86px}.chat-window{height:min(70vh,560px);width:calc(100vw - 16px)}.chat-launcher{right:15px;bottom:15px}}
 .container{max-width:1200px;margin:0 auto;padding:24px 20px}
 .sectitle{font-size:1.3rem;font-weight:800;margin:28px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .alert-block{background:linear-gradient(90deg,rgba(196,30,58,.08),rgba(212,175,55,.05));border:1px solid rgba(212,175,55,.3);border-radius:var(--r);padding:20px;margin-bottom:30px}
@@ -655,16 +681,26 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
   </div>
 </header>
 
-<div id="chatOverlay" class="chat-overlay" onclick="if(event.target===this)closeChat()">
+<button class="chat-launcher" type="button" onclick="toggleChatList()" aria-label="เปิดแชท" title="เปิดแชท">💬</button>
+<div id="chatOverlay" class="chat-overlay">
   <div class="chat-window" onclick="event.stopPropagation()">
     <div class="chat-header">
-      <span id="chatPartnerName" class="panel-title">แชท</span>
-      <button class="chat-close" onclick="closeChat()">×</button>
+      <div><div id="chatPartnerName" class="panel-title">แชท</div><div style="font-size:.72rem;color:var(--soft)">FM_Market Messenger</div></div>
+      <button class="chat-close" onclick="closeChat()" aria-label="ปิดแชท">×</button>
     </div>
-    <div id="chatMessages" class="chat-messages"><div class="empty-state">กำลังโหลด...</div></div>
+    <div id="chatMessages" class="chat-messages"><div class="empty-state">เลือกผู้ติดต่อเพื่อเริ่มแชท</div></div>
+    <div id="emojiPicker" class="emoji-picker" aria-label="เลือกอีโมจิ"></div>
+    <div id="gifPanel" class="gif-panel">
+      <input type="url" id="gifUrlInput" placeholder="วางลิงก์ GIF จาก Tenor / GIPHY">
+      <button class="chat-send-btn" type="button" onclick="sendGifMessage()">ส่ง GIF</button>
+      <button class="btn btn-sm btn-ghost" type="button" onclick="searchGif()">ค้นหา</button>
+      <div class="gif-help">ใช้ลิงก์ไฟล์ GIF โดยตรงจาก media.tenor.com หรือ media.giphy.com</div>
+    </div>
     <div class="chat-input-area">
-      <input type="text" id="chatInput" placeholder="พิมพ์ข้อความ..." onkeydown="onChatEnter(event)">
-      <button class="btn btn-gold" onclick="sendChatMessage()">ส่ง</button>
+      <button class="chat-tool-btn" type="button" title="อีโมจิ" onclick="toggleEmojiPicker()">😊</button>
+      <button class="chat-tool-btn" type="button" title="ส่ง GIF" onclick="toggleGifPanel()">GIF</button>
+      <input type="text" id="chatInput" placeholder="พิมพ์ข้อความ..." onkeydown="onChatEnter(event)" autocomplete="off">
+      <button class="chat-send-btn" onclick="sendChatMessage()">ส่ง</button>
     </div>
   </div>
 </div>
@@ -914,17 +950,20 @@ async function loadChatOverview(){
 function markAllChatRead(){loadChatOverview();}
 async function openChatWith(name){if(name===currentUsername){alert('ไม่สามารถแชตกับตัวเองได้');return;}currentPartner=name;document.getElementById('chatPartnerName').textContent=name;document.getElementById('chatOverlay').classList.add('show');await loadConversation();}
 function closeChat(){document.getElementById('chatOverlay').classList.remove('show');currentPartner=null;loadChatOverview();}
+const emojiChoices=['😀','😃','😄','😁','😆','😅','😂','🤣','🥹','😊','😍','🥰','😘','😎','🤔','😭','😢','😡','👍','👎','👏','🙏','🔥','❤️','💛','💖','🎉','✨','💯','🤝','🙌','😴','🤗','😇','😋','🤩','💔','💸','🚗','🎮','🐱','🐶','🌈','☀️','🌙','🍀','💎','👑'];
+function initEmojiPicker(){const picker=document.getElementById('emojiPicker');if(!picker||picker.dataset.ready)return;emojiChoices.forEach(emoji=>{const b=document.createElement('button');b.type='button';b.className='emoji-choice';b.textContent=emoji;b.title=emoji;b.onclick=()=>{const input=document.getElementById('chatInput');input.value+=emoji;input.focus();};picker.append(b);});picker.dataset.ready='1';}
+function toggleEmojiPicker(){initEmojiPicker();document.getElementById('emojiPicker').classList.toggle('show');document.getElementById('gifPanel').classList.remove('show');}
+function toggleGifPanel(){document.getElementById('gifPanel').classList.toggle('show');document.getElementById('emojiPicker').classList.remove('show');}
+function searchGif(){const q=encodeURIComponent(document.getElementById('chatInput').value.trim()||'reaction');window.open('https://tenor.com/search/'+q+'-gifs','_blank','noopener,noreferrer');}
 async function loadConversation(){
   if(!currentPartner)return;
-  try{const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));const box=document.getElementById('chatMessages');box.replaceChildren();d.messages.forEach(m=>{const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');const content=document.createElement('div');content.textContent=m.text;const time=document.createElement('div');time.className='msg-time';time.textContent=m.time;wrap.append(content,time);box.append(wrap);});box.scrollTop=box.scrollHeight;loadChatOverview();}
-  catch(err){alert(err.message);}
+  try{const d=await api('/api/conversation/'+encodeURIComponent(currentPartner));const box=document.getElementById('chatMessages');box.replaceChildren();d.messages.forEach(m=>{const wrap=document.createElement('div');wrap.className='msg-bubble '+(m.from===currentUsername?'msg-me':'msg-other');if(m.type==='gif'){const img=document.createElement('img');img.className='msg-gif';img.src=m.text;img.alt='GIF';img.loading='lazy';img.referrerPolicy='no-referrer';img.onerror=()=>{img.replaceWith(document.createTextNode('เปิด GIF ไม่ได้ — ลิงก์อาจหมดอายุ'));};wrap.append(img);}else{const content=document.createElement('div');content.textContent=m.text;wrap.append(content);}const time=document.createElement('div');time.className='msg-time';time.textContent=m.time;wrap.append(time);box.append(wrap);});box.scrollTop=box.scrollHeight;loadChatOverview();}
+  catch(err){console.error(err);}
 }
-function onChatEnter(e){if(e.key==='Enter')sendChatMessage();}
-async function sendChatMessage(){
-  const input=document.getElementById('chatInput');const message=input.value.trim();if(!message||!currentPartner)return;
-  try{const d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,text:message})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');input.value='';await loadConversation();loadNotifications();}
-  catch(err){alert(err.message);}
-}
+function onChatEnter(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}}
+async function postChatPayload(payload){if(!currentPartner){alert('กรุณาเลือกผู้ติดต่อก่อน');return false;}try{const d=await api('/api/send-message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:currentPartner,...payload})});if(!d.success)throw new Error(d.message||'ส่งข้อความไม่สำเร็จ');await loadConversation();loadNotifications();return true;}catch(err){alert(err.message);return false;}}
+async function sendChatMessage(){const input=document.getElementById('chatInput');const message=input.value.trim();if(!message)return;if(await postChatPayload({text:message,type:'text'})){input.value='';document.getElementById('emojiPicker').classList.remove('show');}}
+async function sendGifMessage(){const input=document.getElementById('gifUrlInput');const url=input.value.trim();if(!url){alert('วางลิงก์ GIF ก่อนส่ง');return;}if(await postChatPayload({text:url,type:'gif'})){input.value='';document.getElementById('gifPanel').classList.remove('show');}}
 document.addEventListener('click',e=>{
   if(!e.target.closest('.notif-wrap'))document.getElementById('notifPanel').classList.remove('show');
   if(!e.target.closest('.chat-wrap'))document.getElementById('chatListPanel').classList.remove('show');
