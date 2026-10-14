@@ -7,7 +7,6 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "fm_market_secure_key_2026_v4"
 app.secret_key = "fm_market_secure_key_2026_fixed_v1"
 
 DB_FILE = "database.json"
@@ -106,8 +105,7 @@ def upload_image():
     ext = file.filename.rsplit(".", 1)[1].lower()
     fn = f"{uuid.uuid4().hex}.{ext}"
     file.save(os.path.join(UPLOAD_FOLDER, fn))
-    file_url = f"/uploads/{fn}"
-    return jsonify({"success": True, "url": file_url})
+    return jsonify({"success": True, "url": f"/uploads/{fn}"})
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -190,6 +188,105 @@ def delete_post(post_id):
     if not found:
         return jsonify({"success": False, "message": "ไม่พบหรือไม่มีสิทธิ์ลบ"})
     db["posts"] = keep
+    save_database(db)
+    return jsonify({"success": True})
+
+# === แชท & แจ้งเตือน ===
+@app.route('/api/chat-overview', methods=['GET'])
+def chat_overview():
+    if 'user' not in session:
+        return jsonify({"success": False})
+    me = session['user']['username']
+    db = load_database()
+    partners = {}
+    for msg in db["messages"]:
+        if msg["from"] != me and msg["to"] != me:
+            continue
+        other = msg["to"] if msg["from"] == me else msg["from"]
+        if other not in partners:
+            partners[other] = {
+                "last_msg": msg["text"],
+                "time": msg["time"],
+                "unread": 0
+            }
+        if msg["time"] > partners[other]["time"]:
+            partners[other]["last_msg"] = msg["text"]
+            partners[other]["time"] = msg["time"]
+        if msg["to"] == me and not msg.get("read"):
+            partners[other]["unread"] += 1
+    total_unread = sum(p["unread"] for p in partners.values())
+    return jsonify({
+        "success": True,
+        "contacts": partners,
+        "total_unread": total_unread
+    })
+
+@app.route('/api/conversation/<partner>', methods=['GET'])
+def get_conversation(partner):
+    if 'user' not in session:
+        return jsonify({"success": False})
+    me = session['user']['username']
+    db = load_database()
+    for msg in db["messages"]:
+        if msg["from"] == partner and msg["to"] == me:
+            msg["read"] = True
+    save_database(db)
+    conv = [m for m in db["messages"]
+            if (m["from"] == me and m["to"] == partner) or
+               (m["from"] == partner and m["to"] == me)]
+    return jsonify({"success": True, "messages": conv})
+
+@app.route('/api/send-message', methods=['POST'])
+def send_message():
+    if 'user' not in session:
+        return jsonify({"success": False})
+    d = request.json
+    db = load_database()
+    me = session['user']['username']
+    receiver = d.get("to")
+    text = d.get("text", "").strip()
+    if not receiver or not text or receiver == me or receiver not in db["users"]:
+        return jsonify({"success": False, "message": "ข้อมูลไม่ถูกต้อง"})
+    new_msg = {
+        "id": str(uuid.uuid4())[:8],
+        "from": me,
+        "to": receiver,
+        "text": text,
+        "time": datetime.now().strftime('%d/%m/%Y %H:%M'),
+        "read": False
+    }
+    db["messages"].append(new_msg)
+    db["notifications"].append({
+        "id": str(uuid.uuid4())[:8],
+        "type": "message",
+        "from": me,
+        "to": receiver,
+        "text": f"มีข้อความใหม่จาก {me}: {text[:30]}{'...' if len(text) > 30 else ''}",
+        "time": new_msg["time"],
+        "read": False
+    })
+    save_database(db)
+    return jsonify({"success": True, "message": new_msg})
+
+@app.route('/api/notifications', methods=['GET'])
+def get_notifications():
+    if 'user' not in session:
+        return jsonify({"success": False})
+    me = session['user']['username']
+    db = load_database()
+    notifs = [n for n in db["notifications"] if n["to"] == me]
+    unread_count = sum(1 for n in notifs if not n.get("read"))
+    return jsonify({"success": True, "notifications": notifs, "unread_count": unread_count})
+
+@app.route('/api/notifications/mark-read', methods=['POST'])
+def mark_notif_read():
+    if 'user' not in session:
+        return jsonify({"success": False})
+    me = session['user']['username']
+    db = load_database()
+    for n in db["notifications"]:
+        if n["to"] == me:
+            n["read"] = True
     save_database(db)
     return jsonify({"success": True})
 
@@ -335,6 +432,37 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .badge{font-size:.7rem;padding:3px 8px;border-radius:12px;font-weight:700}
 .badge-admin{background:var(--red);color:#fff}
 .badge-member{background:var(--blue);color:#fff}
+/* === แจ้งเตือน & แชท === */
+.notif-wrap, .chat-wrap{position:relative}
+.bell-btn, .chat-btn-nav{background:transparent;border:none;color:var(--text);font-size:1.2rem;padding:6px 10px;cursor:pointer;position:relative}
+.badge-count{position:absolute;top:-2px;right:-4px;background:var(--red);color:#fff;font-size:.65rem;min-width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;transform:scale(0);transition:.2s}
+.badge-count.show{transform:scale(1)}
+.dropdown-panel{position:absolute;top:100%;right:0;margin-top:8px;width:340px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);box-shadow:0 10px 40px rgba(0,0,0,.5);display:none;flex-direction:column;max-height:480px;overflow:hidden;z-index:2000}
+.dropdown-panel.show{display:flex}
+.panel-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.panel-title{font-weight:700}
+.panel-actions button{background:none;border:none;color:var(--soft);font-size:.8rem;margin-left:8px;cursor:pointer}
+.panel-list{overflow-y:auto;flex:1}
+.panel-item{padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:.2s}
+.panel-item:hover{background:rgba(37,99,235,.1)}
+.panel-item.unread{background:rgba(212,175,55,.12);border-left:3px solid var(--gold)}
+.panel-item-name{font-weight:600;font-size:.9rem}
+.panel-item-text{font-size:.85rem;color:var(--soft);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.panel-item-time{font-size:.7rem;color:#555;margin-top:4px}
+.empty-state{padding:30px;text-align:center;color:var(--soft);font-size:.9rem}
+/* หน้าแชท */
+.chat-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:3000;display:none;align-items:flex-end;justify-content:flex-end;padding:20px}
+.chat-overlay.show{display:flex}
+.chat-window{width:100%;max-width:400px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);display:flex;flex-direction:column;max-height:520px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+.chat-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.chat-close{background:none;border:none;color:var(--soft);font-size:1.3rem;cursor:pointer}
+.chat-messages{flex:1;padding:16px;overflow-y:auto;min-height:300px;background:#0a0a10;display:flex;flex-direction:column;gap:10px}
+.msg-bubble{max-width:80%;padding:10px 14px;border-radius:18px;line-height:1.4}
+.msg-me{background:#1e3a5f;align-self:flex-end;border-bottom-right-radius:4px}
+.msg-other{background:#2a2a3a;align-self:flex-start;border-bottom-left-radius:4px}
+.msg-time{font-size:.7rem;color:var(--soft);margin-top:4px;text-align:right}
+.chat-input-area{display:flex;gap:8px;padding:12px;border-top:1px solid var(--border)}
+.chat-input-area input{flex:1;background:#0a0a10;border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;color:var(--text);font-size:.9rem}
 .container{max-width:1200px;margin:0 auto;padding:24px 20px}
 .sectitle{font-size:1.3rem;font-weight:800;margin:28px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .alert-block{background:linear-gradient(90deg,rgba(196,30,58,.08),rgba(212,175,55,.05));border:1px solid rgba(212,175,55,.3);border-radius:var(--r);padding:20px;margin-bottom:30px}
@@ -352,7 +480,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .post-imgs img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:var(--r);cursor:pointer;border:1px solid var(--border);transition:.2s}
 .post-imgs img:hover{transform:scale(1.03)}
 .post-foot{display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--border);font-size:.85rem;color:var(--soft)}
-.chat-btn{background:var(--blue);color:#fff;border:none;padding:8px 14px;border-radius:var(--r);font-weight:700}
+.chat-btn-post{background:var(--blue);color:#fff;border:none;padding:8px 14px;border-radius:var(--r);font-weight:700}
 .del-btn{background:var(--red);color:#fff;border:none;padding:6px 10px;border-radius:8px;font-size:.8rem}
 .form-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:24px;max-width:640px;margin:0 auto 30px}
 .form-card h3{color:var(--gold);margin-bottom:20px}
@@ -369,7 +497,6 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .content-tab{display:none}
 .content-tab.active{display:block;animation:fadeIn .3s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.empty{padding:40px;text-align:center;color:var(--soft)}
 </style>
 </head>
 <body>
@@ -379,16 +506,73 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
     <nav class="nav">
       <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
       <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
-      <button class="btn btn-sm btn-red" onclick="doLogout()">ออก</button>
+      
+      <!-- แจ้งเตือนข้อความ -->
+      <div class="notif-wrap">
+        <button class="bell-btn" onclick="toggleNotif()">
+          🔔
+          <span id="notifBadge" class="badge-count">0</span>
+        </button>
+        <div id="notifPanel" class="dropdown-panel">
+          <div class="panel-head">
+            <span class="panel-title">🔔 การแจ้งเตือน</span>
+            <div class="panel-actions">
+              <button onclick="markAllNotifRead()">อ่านทั้งหมด</button>
+              <button onclick="clearAllNotif()">ล้าง</button>
+            </div>
+          </div>
+          <div id="notifList" class="panel-list">
+            <div class="empty-state">กำลังโหลด...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- รายการแชท -->
+      <div class="chat-wrap">
+        <button class="bell-btn" onclick="toggleChatList()">
+          💬
+          <span id="chatBadge" class="badge-count">0</span>
+        </button>
+        <div id="chatListPanel" class="dropdown-panel">
+          <div class="panel-head">
+            <span class="panel-title">💬 ข้อความที่คุยด้วย</span>
+            <div class="panel-actions">
+              <button onclick="markAllChatRead()">อ่านทั้งหมด</button>
+            </div>
+          </div>
+          <div id="chatListBody" class="panel-list">
+            <div class="empty-state">กำลังโหลด...</div>
+          </div>
+        </div>
+      </div>
+
       <span>{{ session_user.username }}</span>
       {% if session_user.role == 'admin' %}
       <span class="badge badge-admin">ผู้ดูแล</span>
       {% else %}
       <span class="badge badge-member">สมาชิก</span>
       {% endif %}
+      <button class="btn btn-sm btn-red" onclick="doLogout()">ออก</button>
     </nav>
   </div>
 </header>
+
+<!-- หน้าต่างแชท -->
+<div id="chatOverlay" class="chat-overlay" onclick="if(event.target===this)closeChat()">
+  <div class="chat-window" onclick="event.stopPropagation()">
+    <div class="chat-header">
+      <span id="chatPartnerName" class="panel-title">แชท</span>
+      <button class="chat-close" onclick="closeChat()">×</button>
+    </div>
+    <div id="chatMessages" class="chat-messages">
+      <div class="empty-state">กำลังโหลด...</div>
+    </div>
+    <div class="chat-input-area">
+      <input type="text" id="chatInput" placeholder="พิมพ์ข้อความ..." onkeydown="onChatEnter(event)">
+      <button class="btn btn-gold" onclick="sendChatMessage()">ส่ง</button>
+    </div>
+  </div>
+</div>
 
 <main class="container">
   <div id="tabMarket" class="content-tab active">
@@ -438,12 +622,12 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
         <div class="post-foot">
           <span>👤 {{ p.author }}</span>
           <span>{{ p.time }}</span>
-          <button class="chat-btn" onclick="alert('เปิดแชทกับ {{p.author}}')">💬 คุยด้วย</button>
+          <button class="chat-btn-post" onclick="openChatWith('{{p.author}}')">💬 คุยด้วย</button>
         </div>
       </div>
       {% endfor %}
       {% else %}
-      <div class="empty">ยังไม่มีรายการ — เป็นคนแรกที่ลงประกาศเลย!</div>
+      <div class="empty-state">ยังไม่มีรายการ — เป็นคนแรกที่ลงประกาศเลย!</div>
       {% endif %}
     </div>
   </div>
@@ -484,6 +668,159 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 
 <script>
 let selectedImgs = [];
+let currentChatPartner = null;
+let pollTimer = null;
+
+// โหลดจำนวนแจ้งเตือน + รายการแชท
+async function refreshBadges(){
+  try{
+    const [chatRes, notifRes] = await Promise.all([
+      fetch('/api/chat-overview'),
+      fetch('/api/notifications')
+    ]);
+    const chatData = await chatRes.json();
+    const notifData = await notifRes.json();
+    
+    const chatBadge = document.getElementById('chatBadge');
+    const notifBadge = document.getElementById('notifBadge');
+    
+    if(chatData.total_unread > 0){
+      chatBadge.textContent = chatData.total_unread;
+      chatBadge.classList.add('show');
+    } else {
+      chatBadge.classList.remove('show');
+    }
+    
+    if(notifData.unread_count > 0){
+      notifBadge.textContent = notifData.unread_count;
+      notifBadge.classList.add('show');
+    } else {
+      notifBadge.classList.remove('show');
+    }
+  }catch(e){console.error(e)}
+}
+
+// แผงแจ้งเตือน
+async function toggleNotif(){
+  const panel = document.getElementById('notifPanel');
+  panel.classList.toggle('show');
+  if(panel.classList.contains('show')) await loadNotifList();
+  else document.getElementById('chatListPanel').classList.remove('show');
+}
+
+async function loadNotifList(){
+  const res = await fetch('/api/notifications');
+  const d = await res.json();
+  const list = document.getElementById('notifList');
+  if(!d.notifications.length){
+    list.innerHTML = '<div class="empty-state">ยังไม่มีการแจ้งเตือน</div>';
+    return;
+  }
+  list.innerHTML = d.notifications.map(n=>`
+    <div class="panel-item ${!n.read?'unread':''}">
+      <div class="panel-item-name">${n.from || 'ระบบ'}</div>
+      <div class="panel-item-text">${n.text}</div>
+      <div class="panel-item-time">${n.time}</div>
+    </div>
+  `).join('');
+}
+
+async function markAllNotifRead(){
+  await fetch('/api/notifications/mark-read',{method:'POST'});
+  await loadNotifList();
+  await refreshBadges();
+}
+
+async function clearAllNotif(){
+  if(!confirm('ล้างรายการแจ้งเตือนทั้งหมด?')) return;
+  document.getElementById('notifList').innerHTML = '<div class="empty-state">ล้างแล้ว</div>';
+  await refreshBadges();
+}
+
+// แผงรายการแชท
+async function toggleChatList(){
+  const panel = document.getElementById('chatListPanel');
+  panel.classList.toggle('show');
+  if(panel.classList.contains('show')) await loadChatList();
+  else document.getElementById('notifPanel').classList.remove('show');
+}
+
+async function loadChatList(){
+  const res = await fetch('/api/chat-overview');
+  const d = await res.json();
+  const list = document.getElementById('chatListBody');
+  if(!Object.keys(d.contacts).length){
+    list.innerHTML = '<div class="empty-state">ยังไม่มีข้อความ — ไปทักคนอื่นก่อนเลย!</div>';
+    return;
+  }
+  list.innerHTML = Object.entries(d.contacts).map(([name, info])=>`
+    <div class="panel-item ${info.unread>0?'unread':''}" onclick="openChatWith('${name}')">
+      <div class="panel-item-name">${name} ${info.unread>0?`<span style="color:var(--red);font-size:.7rem">(${info.unread})</span>`:''}</div>
+      <div class="panel-item-text">${info.last_msg}</div>
+      <div class="panel-item-time">${info.time}</div>
+    </div>
+  `).join('');
+}
+
+async function markAllChatRead(){
+  await fetch('/api/notifications/mark-read',{method:'POST'});
+  await loadChatList();
+  await refreshBadges();
+}
+
+// หน้าต่างแชท
+async function openChatWith(name){
+  currentChatPartner = name;
+  document.getElementById('chatPartnerName').textContent = `คุยกับ ${name}`;
+  document.getElementById('chatOverlay').classList.add('show');
+  document.getElementById('chatListPanel').classList.remove('show');
+  document.getElementById('notifPanel').classList.remove('show');
+  await loadChatMessages();
+}
+
+function closeChat(){
+  document.getElementById('chatOverlay').classList.remove('show');
+  currentChatPartner = null;
+}
+
+async function loadChatMessages(){
+  if(!currentChatPartner) return;
+  const res = await fetch(`/api/conversation/${currentChatPartner}`);
+  const d = await res.json();
+  const box = document.getElementById('chatMessages');
+  if(!d.messages.length){
+    box.innerHTML = '<div class="empty-state">ยังไม่มีข้อความ พิมพ์ข้อความแรกได้เลย!</div>';
+    return;
+  }
+  box.innerHTML = d.messages.map(m=>`
+    <div class="msg-bubble ${m.from === '{{ session_user.username }}'?'msg-me':'msg-other'}">
+      <div>${m.text}</div>
+      <div class="msg-time">${m.time}</div>
+    </div>
+  `).join('');
+  box.scrollTop = box.scrollHeight;
+  await refreshBadges();
+}
+
+async function sendChatMessage(){
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if(!text || !currentChatPartner) return;
+  input.value = '';
+  await fetch('/api/send-message',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({to:currentChatPartner, text:text})
+  });
+  await loadChatMessages();
+  await loadChatList();
+}
+
+function onChatEnter(e){
+  if(e.key === 'Enter') sendChatMessage();
+}
+
+// โพสต์ & ทั่วไป
 document.getElementById('imageInput').addEventListener('change', async e=>{
   for(const file of e.target.files){
     const fd = new FormData();
@@ -544,16 +881,7 @@ async function doLogout(){
   await fetch('/api/logout');
   location.href='/';
 }
-</script>
-</body>
-</html>
-'''
 
-if __name__ == '__main__':
-    print("="*60)
-    print("🖤 FM_Market — แก้ระบบเข้ารหัสตรงกันทั้งระบบ")
-    print("✅ สมัครแล้วเข้าใหม่ได้แน่นอน")
-    print("✅ ลบฐานข้อมูลเก่าทิ้งแล้วสมัครใหม่เท่านั้น")
-    print("⚠️ หมายเหตุ: แผนฟรีของ Render จะลบรูปเมื่อรีสตาร์ทระบบ")
-    print("="*60)
-    app.run(host='0.0.0.0', port=5000)
+// รีเฟรชจำนวนแจ้งเตือนทุก 30 วินาที
+refreshBadges();
+pollTimer = setInterval(refresh
