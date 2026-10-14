@@ -105,7 +105,7 @@ def load_database():
             post_time = datetime.strptime(p["time"], '%d/%m/%Y %H:%M')
             if now - post_time <= timedelta(hours=POST_LIFETIME_HOURS):
                 fresh_posts.append(p)
-        except:
+        except Exception:
             fresh_posts.append(p)
     data["posts"] = fresh_posts
     save_database(data)
@@ -590,7 +590,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
 .avatar-wrap.member{background:linear-gradient(135deg,#4b5563,#6b7280,#4b5563)}
 .avatar-img{width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid #000}
 .avatar-placeholder{width:100%;height:100%;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1f2937;font-size:1.1rem;border:2px solid #000}
-.post-title{font-size:1.1rem;margin-bottom:4px}
+.post-title{font-size:1.1rem;margin-bottom:8px}
 .post-meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .role-badge{font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:700}
 .post-desc{color:#bbb;white-space:pre-line;margin-bottom:12px}
@@ -789,3 +789,9 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <label>หมวดหมู่</label>
           <select id="category" class="form-input">
             {% for k,v in categories.items() %}
+            <option value="{{k}}">{{v.icon}} {{v.name}}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>หัวข้อ *
