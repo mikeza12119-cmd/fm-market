@@ -12,8 +12,10 @@ app.secret_key = os.environ.get("SECRET_KEY", "local-development-only-change-me"
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.environ.get("DB_FILE", os.path.join(BASE_DIR, "database.json"))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
+DB_FILE = os.environ.get("DB_FILE", os.path.join(DATA_DIR, "database.json"))
+# Keep uploaded images on the same persistent volume as the database.
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", os.path.join(DATA_DIR, "uploads"))
 AVATAR_FOLDER = os.path.join(UPLOAD_FOLDER, "avatars")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 POST_LIFETIME_HOURS = 3
@@ -90,8 +92,15 @@ def load_database():
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except Exception:
-        data = default_data.copy()
+    except (json.JSONDecodeError, OSError) as exc:
+        # Never silently replace a broken/unreadable database with an empty one.
+        # That could make all existing accounts and listings appear to disappear.
+        app.logger.exception("Unable to read database file %s", DB_FILE)
+        raise RuntimeError(
+            f"Cannot read database at {DB_FILE}; refusing to overwrite existing data"
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Database at {DB_FILE} is not a JSON object; refusing to overwrite it")
     for k in default_data:
         if k not in data:
             data[k] = default_data[k]
