@@ -26,24 +26,9 @@ def allowed_file(filename):
 
 def get_role_config(role):
     roles = {
-        "admin": {
-            "name": "ผู้ดูแลระบบ",
-            "badge": "👑",
-            "bg_badge": "linear-gradient(90deg, #b8860b, #ffd700)",
-            "text_color": "#ffd700"
-        },
-        "vip": {
-            "name": "สมาชิก VIP",
-            "badge": "⭐",
-            "bg_badge": "linear-gradient(90deg, #8b00ff, #da70d6)",
-            "text_color": "#da70d6"
-        },
-        "member": {
-            "name": "สมาชิกทั่วไป",
-            "badge": "👤",
-            "bg_badge": "linear-gradient(90deg, #374151, #6b7280)",
-            "text_color": "#9ca3af"
-        }
+        "admin": {"name": "ผู้ดูแลระบบ", "badge": "👑", "bg_badge": "linear-gradient(90deg, #b8860b, #ffd700)", "text_color": "#ffd700"},
+        "vip": {"name": "สมาชิก VIP", "badge": "⭐", "bg_badge": "linear-gradient(90deg, #8b00ff, #da70d6)", "text_color": "#da70d6"},
+        "member": {"name": "สมาชิกทั่วไป", "badge": "👤", "bg_badge": "linear-gradient(90deg, #374151, #6b7280)", "text_color": "#9ca3af"}
     }
     return roles.get(role, roles["member"])
 
@@ -96,15 +81,12 @@ def load_database():
         data["settings"] = default_data["settings"]
     for uname in data["users"]:
         user = data["users"][uname]
-        if "role" not in user:
-            user["role"] = "member"
-        if "avatar" not in user:
-            user["avatar"] = None
-        if "bio" not in user:
-            user["bio"] = ""
+        if "role" not in user: user["role"] = "member"
+        if "avatar" not in user: user["avatar"] = None
+        if "bio" not in user: user["bio"] = ""
     now = datetime.now()
-    fresh_posts = []
     lifetime = data["settings"].get("post_lifetime_hours", POST_LIFETIME_HOURS)
+    fresh_posts = []
     for p in data["posts"]:
         try:
             post_time = datetime.strptime(p["time"], '%d/%m/%Y %H:%M')
@@ -233,10 +215,6 @@ def admin_dashboard():
             "total_users": len(db["users"]),
             "total_posts": len(db["posts"]),
             "total_messages": len(db["messages"]),
-            "active_users_today": len(set(
-                [m["from"] for m in db["messages"] if m["time"].startswith(datetime.now().strftime('%d/%m/%Y'))] +
-                [m["to"] for m in db["messages"] if m["time"].startswith(datetime.now().strftime('%d/%m/%Y'))]
-            ))
         },
         "recent_users": [
             {"username": u, **data}
@@ -258,8 +236,6 @@ def update_settings():
         db["settings"]["max_images_per_post"] = max(1, min(10, int(d["max_images_per_post"])))
     if "site_name" in d:
         db["settings"]["site_name"] = d["site_name"].strip()
-    if "maintenance_mode" in d:
-        db["settings"]["maintenance_mode"] = bool(d["maintenance_mode"])
     save_database(db)
     return jsonify({"success": True, "message": "บันทึกการตั้งค่าเรียบร้อย"})
 
@@ -311,13 +287,6 @@ def send_announcement():
         })
     save_database(db)
     return jsonify({"success": True, "message": "ส่งประกาศถึงทุกคนสำเร็จ"})
-
-@app.route('/api/admin/messages', methods=['GET'])
-def admin_messages():
-    if 'user' not in session or session['user']['role'] != 'admin':
-        return jsonify({"success": False, "message": "ไม่มีสิทธิ์"})
-    db = load_database()
-    return jsonify({"success": True, "messages": db["messages"][-100:]})
 
 @app.route('/api/admin/delete-post/<post_id>', methods=['DELETE'])
 def admin_delete_post(post_id):
@@ -446,22 +415,13 @@ def chat_overview():
             continue
         other = msg["to"] if msg["from"] == me else msg["from"]
         if other not in partners:
-            partners[other] = {
-                "last_msg": msg["text"],
-                "time": msg["time"],
-                "unread": 0
-            }
+            partners[other] = {"last_msg": msg["text"], "time": msg["time"], "unread": 0}
         if msg["time"] > partners[other]["time"]:
             partners[other]["last_msg"] = msg["text"]
             partners[other]["time"] = msg["time"]
         if msg["to"] == me and not msg.get("read"):
             partners[other]["unread"] += 1
-    total_unread = sum(p["unread"] for p in partners.values())
-    return jsonify({
-        "success": True,
-        "contacts": partners,
-        "total_unread": total_unread
-    })
+    return jsonify({"success": True, "contacts": partners, "total_unread": sum(p["unread"] for p in partners.values())})
 
 @app.route('/api/conversation/<partner>', methods=['GET'])
 def get_conversation(partner):
@@ -473,9 +433,7 @@ def get_conversation(partner):
         if msg["from"] == partner and msg["to"] == me:
             msg["read"] = True
     save_database(db)
-    conv = [m for m in db["messages"]
-            if (m["from"] == me and m["to"] == partner) or
-               (m["from"] == partner and m["to"] == me)]
+    conv = [m for m in db["messages"] if (m["from"] == me and m["to"] == partner) or (m["from"] == partner and m["to"] == me)]
     return jsonify({"success": True, "messages": conv})
 
 @app.route('/api/send-message', methods=['POST'])
@@ -763,3 +721,17 @@ tr:hover{background:rgba(255,255,255,.02)}
       <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
       <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
       {% if session_user.role == 'admin' %}
+      <button class="btn btn-sm btn-red" onclick="showTab('admin')">⚙️ แดชบอร์ดแอดมิน</button>
+      {% endif %}
+      <div class="notif-wrap">
+        <button class="bell-btn" onclick="toggleNotif()">🔔<span id="notifBadge" class="badge-count">0</span></button>
+        <div id="notifPanel" class="dropdown-panel">
+          <div class="panel-head">
+            <span class="panel-title">🔔 การแจ้งเตือน</span>
+            <div class="panel-actions"><button onclick="markAllNotifRead()">อ่านทั้งหมด</button></div>
+          </div>
+          <div id="notifList" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
+        </div>
+      </div>
+      <div class="chat-wrap">
+        <button class="bell-btn" onclick="toggleChatList()">💬<span id="chatBadge" class="badge-count">0
