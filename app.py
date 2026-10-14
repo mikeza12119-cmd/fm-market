@@ -642,10 +642,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
       <button class="btn btn-sm btn-ghost" onclick="showTab('market')">📋 ตลาด</button>
       <button class="btn btn-sm btn-gold" onclick="showTab('post')">✍️ โพสต์</button>
       <div class="notif-wrap">
-        <button class="bell-btn" onclick="toggleNotif()">
-          🔔
-          <span id="notifBadge" class="badge-count">0</span>
-        </button>
+        <button class="bell-btn" onclick="toggleNotif()">🔔<span id="notifBadge" class="badge-count">0</span></button>
         <div id="notifPanel" class="dropdown-panel">
           <div class="panel-head">
             <span class="panel-title">🔔 การแจ้งเตือน</span>
@@ -654,26 +651,17 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
               <button onclick="clearAllNotif()">ล้าง</button>
             </div>
           </div>
-          <div id="notifList" class="panel-list">
-            <div class="empty-state">กำลังโหลด...</div>
-          </div>
+          <div id="notifList" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
         </div>
       </div>
       <div class="chat-wrap">
-        <button class="bell-btn" onclick="toggleChatList()">
-          💬
-          <span id="chatBadge" class="badge-count">0</span>
-        </button>
+        <button class="bell-btn" onclick="toggleChatList()">💬<span id="chatBadge" class="badge-count">0</span></button>
         <div id="chatListPanel" class="dropdown-panel">
           <div class="panel-head">
             <span class="panel-title">💬 ข้อความที่คุยด้วย</span>
-            <div class="panel-actions">
-              <button onclick="markAllChatRead()">อ่านทั้งหมด</button>
-            </div>
+            <div class="panel-actions"><button onclick="markAllChatRead()">อ่านทั้งหมด</button></div>
           </div>
-          <div id="chatListBody" class="panel-list">
-            <div class="empty-state">กำลังโหลด...</div>
-          </div>
+          <div id="chatListBody" class="panel-list"><div class="empty-state">กำลังโหลด...</div></div>
         </div>
       </div>
       <div class="profile-wrap">
@@ -697,9 +685,7 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
       <span id="chatPartnerName" class="panel-title">แชท</span>
       <button class="chat-close" onclick="closeChat()">×</button>
     </div>
-    <div id="chatMessages" class="chat-messages">
-      <div class="empty-state">กำลังโหลด...</div>
-    </div>
+    <div id="chatMessages" class="chat-messages"><div class="empty-state">กำลังโหลด...</div></div>
     <div class="chat-input-area">
       <input type="text" id="chatInput" placeholder="พิมพ์ข้อความ..." onkeydown="onChatEnter(event)">
       <button class="btn btn-gold" onclick="sendChatMessage()">ส่ง</button>
@@ -794,4 +780,8 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           </select>
         </div>
         <div class="form-group">
-          <label>หัวข้อ *
+          <label>หัวข้อ *</label>
+          <input type="text" id="title" class="form-input" placeholder="เช่น ขายเงิน M ราคาถูก" required>
+        </div>
+        <div class="form-group">
+          <label>
