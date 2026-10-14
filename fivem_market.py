@@ -449,7 +449,7 @@ button[type=submit]:hover{transform:translateY(-2px)}
     <div id="regErr" class="error-msg"></div>
     <form id="reg" onsubmit="doR(event)">
       <input type="text" id="ru" placeholder="ตั้งชื่อผู้ใช้" required autocomplete="username">
-      <input type="password" id="rp" placeholder="ตั้งรหัสผ่าน (4 ตัวขึ้นไป ยาวได้เท่าไหร่ก็ได้)" required autocomplete="new-password">
+      <input type="password" id="rp" placeholder="ตั้งรหัสผ่าน (4 ตัวขึ้นไป)" required autocomplete="new-password">
       <button type="submit">สร้างบัญชี</button>
     </form>
     <div class="warn">⚠️ ห้ามโอนเงินให้ใครโดยตรง — ใช้แอดมินกลางเท่านั้น</div>
@@ -789,10 +789,3 @@ header{position:sticky;top:0;z-index:999;background:rgba(5,5,8,.92);backdrop-fil
           <label>หมวดหมู่</label>
           <select id="category" class="form-input">
             {% for k,v in categories.items() %}
-            <option value="{{k}}">{{v.icon}} {{v.name}}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>หัวข้อ</label>
-          <input type="text" id
